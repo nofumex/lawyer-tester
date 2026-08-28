@@ -25,13 +25,17 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         if is_admin:
             reply,keyboard=admin.callback(callback); transport.send(user_id,reply,inline=keyboard)
         return
+    if callback and callback.startswith('a:'):
+        if is_admin:
+            reply,keyboard=admin.callback(transport.platform,user_id,callback); transport.send(user_id,reply,inline=keyboard)
+        return
     if text=='/admin':
         if is_admin:
             reply,keyboard=admin.menu(); transport.send(user_id,reply,inline=keyboard)
         else: transport.send(user_id,'Недостаточно прав.')
         return
-    if is_admin and (reply:=admin.command(text)):
-        transport.send(user_id,reply); return
+    if is_admin and (result:=admin.text(transport.platform,user_id,text)):
+        reply,keyboard=result; transport.send(user_id,reply,inline=keyboard); return
     if text=='/start':
         greeting,prompt=engine.begin(transport.platform,user_id,name); transport.send(user_id,greeting)
         if prompt: transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)

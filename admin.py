@@ -1,53 +1,65 @@
 from __future__ import annotations
-
+import json
+from typing import Any
 from storage import Storage
 
-
-MENU = [[{'text':'Тесты','callback_data':'admin:tests'},{'text':'Статистика','callback_data':'admin:stats'}],[{'text':'Рассылка','callback_data':'admin:broadcast'}]]
-
+def b(text:str,data:str)->dict[str,str]: return {'text':text,'callback_data':data}
+HOME=[[b('Тесты','a:tests'),b('Статистика','a:stats')],[b('Рассылка','a:cast')]]
 
 class Admin:
-    def __init__(self, store: Storage) -> None: self.store=store
-    def menu(self) -> tuple[str,list[list[dict[str,str]]]]: return 'Админка: выберите раздел.',MENU
-    def callback(self, data:str) -> tuple[str,list[list[dict[str,str]]]|None]:
-        if data=='admin:stats':
-            s=self.store.stats(); return (f"Пользователи: {s['users']}\nНачали: {s['started']}\nЗавершили: {s['completed']}\nВ процессе: {s['active']}\nБросили: {s['abandoned']}\nНачато сегодня/неделя/месяц: {s['day']}/{s['week']}/{s['month']}",MENU)
-        if data=='admin:tests':
-            tests=self.store.db.execute('SELECT id,name,enabled FROM tests ORDER BY id').fetchall()
-            text='Тесты:\n'+ '\n'.join(f"{x['id']}. {'✅' if x['enabled'] else '⛔'} {x['name']}" for x in tests)
-            return text+'\n\nКоманды: test on ID | test off ID | test delete ID',MENU
-        if data=='admin:broadcast': return 'Рассылка: отправьте команду broadcast ТЕКСТ. Для форматирования Telegram используйте HTML. Перед отправкой бот покажет предпросмотр и попросит подтвердить.',MENU
-        return 'Неизвестное действие.',MENU
-    def command(self,text:str) -> str | None:
-        # Compact command API permits full test/question/option lifecycle without code changes.
-        parts=text.split(' ',3)
-        if len(parts)>=3 and parts[0]=='test' and parts[1] in ('on','off','delete'):
-            if parts[1]=='delete': self.store.db.execute('DELETE FROM tests WHERE id=?',(parts[2],)); result='Тест удалён.'
-            else: self.store.db.execute('UPDATE tests SET enabled=? WHERE id=?',(parts[1]=='on',parts[2])); result='Статус теста обновлён.'
-            self.store.db.commit(); return result
-        if len(parts)>=4 and parts[0]=='question' and parts[1]=='add':
-            # question add TEST_ID TYPE Текст
-            test_id,kind=int(parts[2]),parts[3].split(' ',1)[0]; question=parts[3][len(kind):].strip()
-            pos=self.store._one('SELECT COALESCE(MAX(position),0)+1 FROM questions WHERE test_id=?',(test_id,))[0]
-            self.store.db.execute('INSERT INTO questions(test_id,position,text,kind,required) VALUES(?,?,?,?,1)',(test_id,pos,question,kind)); self.store.db.commit(); return 'Вопрос добавлен.'
-        if len(parts)>=3 and parts[0]=='question' and parts[1] in ('delete','move','type','required','edit'):
-            qid=int(parts[2]); tail=parts[3] if len(parts)>3 else ''
-            if parts[1]=='delete': self.store.db.execute('DELETE FROM questions WHERE id=?',(qid,))
-            elif parts[1]=='move': self.store.db.execute('UPDATE questions SET position=? WHERE id=?',(int(tail),qid))
-            elif parts[1]=='type' and tail in ('text','single_choice','multi_choice'): self.store.db.execute('UPDATE questions SET kind=? WHERE id=?',(tail,qid))
-            elif parts[1]=='required' and tail in ('0','1'): self.store.db.execute('UPDATE questions SET required=? WHERE id=?',(tail,qid))
-            elif parts[1]=='edit' and tail: self.store.db.execute('UPDATE questions SET text=? WHERE id=?',(tail,qid))
-            else: return 'Неверные параметры вопроса.'
-            self.store.db.commit(); return 'Вопрос обновлён.'
-        if len(parts)>=4 and parts[0]=='option' and parts[1]=='add':
-            qid=int(parts[2]); pos=self.store._one('SELECT COALESCE(MAX(position),0)+1 FROM options WHERE question_id=?',(qid,))[0]
-            self.store.db.execute('INSERT INTO options(question_id,position,text) VALUES(?,?,?)',(qid,pos,parts[3])); self.store.db.commit(); return 'Вариант добавлен.'
-        if len(parts)>=3 and parts[0]=='option' and parts[1] in ('delete','move','edit','action'):
-            oid=int(parts[2]); tail=parts[3] if len(parts)>3 else ''
-            if parts[1]=='delete': self.store.db.execute('DELETE FROM options WHERE id=?',(oid,))
-            elif parts[1]=='move': self.store.db.execute('UPDATE options SET position=? WHERE id=?',(int(tail),oid))
-            elif parts[1]=='edit' and tail: self.store.db.execute('UPDATE options SET text=? WHERE id=?',(tail,oid))
-            elif parts[1]=='action' and tail: self.store.db.execute('UPDATE options SET action_json=? WHERE id=?',(tail,oid))
-            else: return 'Неверные параметры варианта.'
-            self.store.db.commit(); return 'Вариант обновлён.'
-        return None
+ def __init__(self,s:Storage): self.s=s
+ def menu(self): return 'Админка',HOME
+ def callback(self,platform:str,user:str,data:str)->tuple[str,list]|None:
+  if data=='a:home':return self.menu()
+  if data=='a:tests':
+   rows=self.s.db.execute('SELECT * FROM tests ORDER BY id').fetchall(); keys=[[b(('✅ ' if x['enabled'] else '⛔ ')+x['name'],f'a:test:{x["id"]}')] for x in rows]+[[b('＋ Создать тест','a:newtest'),b('‹ Назад','a:home')]]
+   return 'Тесты',keys
+  if data.startswith('a:test:'):
+   t=self.s._one('SELECT * FROM tests WHERE id=?',(data.split(':')[2],));
+   return t['name'],[[b('Вкл/выкл',f'a:toggle:{t["id"]}'),b('Название',f'a:rename:{t["id"]}')],[b('Вопросы',f'a:qs:{t["id"]}'),b('Удалить',f'a:deltest:{t["id"]}')],[b('‹ К тестам','a:tests')]]
+  if data.startswith('a:toggle:'):
+   i=data.split(':')[2];self.s.db.execute('UPDATE tests SET enabled=1-enabled WHERE id=?',(i,));self.s.db.commit();return self.callback(platform,user,f'a:test:{i}')
+  if data.startswith('a:rename:') or data=='a:newtest':
+   self.s.set_draft(platform,user,'rename_test' if data!='a:newtest' else 'new_test',{'id':data.split(':')[2] if ':' in data else None});return 'Введите название теста.',[[b('Отмена','a:home')]]
+  if data.startswith('a:deltest:'):
+   self.s.db.execute('DELETE FROM tests WHERE id=?',(data.split(':')[2],));self.s.db.commit();return self.callback(platform,user,'a:tests')
+  if data.startswith('a:qs:'):
+   tid=data.split(':')[2]; qs=self.s.test_questions(int(tid));return 'Вопросы',[[b(f"{q['position']}. {q['text'][:32]}",f'a:q:{q["id"]}')] for q in qs]+[[b('＋ Вопрос',f'a:newq:{tid}'),b('‹ Назад',f'a:test:{tid}')]]
+  if data.startswith('a:q:'):
+   q=self.s._one('SELECT * FROM questions WHERE id=?',(data.split(':')[2],));return q['text'],[[b('Текст',f'a:qtext:{q["id"]}'),b('Тип',f'a:qtype:{q["id"]}')],[b('Обязательность',f'a:qreq:{q["id"]}'),b('Порядок',f'a:qpos:{q["id"]}')],[b('Варианты',f'a:opts:{q["id"]}'),b('Удалить',f'a:delq:{q["id"]}')],[b('‹ Назад',f'a:qs:{q["test_id"]}')]]
+  if data.startswith('a:qtype:'):
+   i=data.split(':')[2];return 'Выберите тип',[[b(x,f'a:settype:{i}:{x}')] for x in ('text','single_choice','multi_choice')]
+  if data.startswith('a:settype:'):
+   _,_,i,kind=data.split(':');self.s.db.execute('UPDATE questions SET kind=? WHERE id=?',(kind,i));self.s.db.commit();return self.callback(platform,user,f'a:q:{i}')
+  if data.startswith('a:qreq:'):
+   i=data.split(':')[2];self.s.db.execute('UPDATE questions SET required=1-required WHERE id=?',(i,));self.s.db.commit();return self.callback(platform,user,f'a:q:{i}')
+  if data.startswith('a:qtext:') or data.startswith('a:qpos:') or data.startswith('a:newq:'):
+   kind='q_text' if ':qtext:' in data else 'q_pos' if ':qpos:' in data else 'new_q';self.s.set_draft(platform,user,kind,{'id':data.split(':')[2]});return 'Введите текст вопроса.' if kind!='q_pos' else 'Введите новый номер вопроса.',[[b('Отмена','a:home')]]
+  if data.startswith('a:opts:'):
+   qid=data.split(':')[2];opts=self.s.options(int(qid));return 'Варианты',[[b(f"{o['position']}. {o['text'][:35]}",f'a:o:{o["id"]}')] for o in opts]+[[b('＋ Вариант',f'a:newo:{qid}'),b('‹ Назад',f'a:q:{qid}')]]
+  if data.startswith('a:o:'):
+   o=self.s._one('SELECT * FROM options WHERE id=?',(data.split(':')[2],));return o['text'],[[b('Текст',f'a:otext:{o["id"]}'),b('Порядок',f'a:opos:{o["id"]}')],[b('Action',f'a:action:{o["id"]}'),b('Удалить',f'a:delo:{o["id"]}')],[b('‹ Назад',f'a:opts:{o["question_id"]}')]]
+  if data.startswith('a:otext:') or data.startswith('a:opos:') or data.startswith('a:newo:'):
+   kind='o_text' if ':otext:' in data else 'o_pos' if ':opos:' in data else 'new_o';self.s.set_draft(platform,user,kind,{'id':data.split(':')[2]});return 'Введите текст варианта.' if kind!='o_pos' else 'Введите новый номер варианта.',[[b('Отмена','a:home')]]
+  if data.startswith('a:action:'):
+   i=data.split(':')[2];return 'Действие ответа',[[b('Нет',f'a:setact:{i}:none')],[b('Перевести в «Готов к сотрудничеству»',f'a:setact:{i}:move_stage')]]
+  if data.startswith('a:setact:'):
+   _,_,i,act=data.split(':');self.s.db.execute('UPDATE options SET action_json=? WHERE id=?',(None if act=='none' else json.dumps({'type':act}),i));self.s.db.commit();return self.callback(platform,user,f'a:o:{i}')
+  if data.startswith('a:delq:') or data.startswith('a:delo:'):
+   table='questions' if ':delq:' in data else 'options';self.s.db.execute(f'DELETE FROM {table} WHERE id=?',(data.split(':')[2],));self.s.db.commit();return self.menu()
+  if data=='a:stats':
+   x=self.s.stats();return f"Пользователи: {x['users']}\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nПереведено: {x['moved']}",HOME
+  return self.menu()
+ def text(self,platform:str,user:str,text:str):
+  d=self.s.draft(platform,user)
+  if not d:return None
+  kind,p=d; self.s.clear_draft(platform,user); i=p['id']
+  with self.s.db:
+   if kind=='rename_test':self.s.db.execute('UPDATE tests SET name=? WHERE id=?',(text,i));return self.callback(platform,user,f'a:test:{i}')
+   if kind=='new_test':self.s.db.execute('INSERT INTO tests(name,enabled,created_at) VALUES(?,?,strftime("%s","now"))',(text,1));return self.callback(platform,user,'a:tests')
+   if kind=='q_text':self.s.db.execute('UPDATE questions SET text=? WHERE id=?',(text,i));return self.callback(platform,user,f'a:q:{i}')
+   if kind=='q_pos':self.s.db.execute('UPDATE questions SET position=? WHERE id=?',(int(text),i));return self.menu()
+   if kind=='new_q':self.s.db.execute('INSERT INTO questions(test_id,position,text,kind,required) VALUES(?,COALESCE((SELECT MAX(position)+1 FROM questions WHERE test_id=?),1),?,"text",1)',(i,i,text));return self.callback(platform,user,f'a:qs:{i}')
+   if kind=='o_text':self.s.db.execute('UPDATE options SET text=? WHERE id=?',(text,i));return self.callback(platform,user,f'a:o:{i}')
+   if kind=='o_pos':self.s.db.execute('UPDATE options SET position=? WHERE id=?',(int(text),i));return self.menu()
+   if kind=='new_o':self.s.db.execute('INSERT INTO options(question_id,position,text) VALUES(?,COALESCE((SELECT MAX(position)+1 FROM options WHERE question_id=?),1),?)',(i,i,text));return self.callback(platform,user,f'a:opts:{i}')

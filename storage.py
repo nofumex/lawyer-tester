@@ -24,6 +24,7 @@ class Storage:
         CREATE TABLE IF NOT EXISTS draft_answers(attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,question_id INTEGER NOT NULL REFERENCES questions(id),value_json TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(attempt_id,question_id));
         CREATE TABLE IF NOT EXISTS action_executions(attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,option_id INTEGER NOT NULL REFERENCES options(id) ON DELETE CASCADE,action_type TEXT NOT NULL,executed_at INTEGER NOT NULL,PRIMARY KEY(attempt_id,option_id,action_type));
         CREATE TABLE IF NOT EXISTS broadcasts(id INTEGER PRIMARY KEY,platform TEXT,source_platform TEXT NOT NULL,source_user_id TEXT NOT NULL,payload_json TEXT NOT NULL,buttons_json TEXT NOT NULL,created_at INTEGER NOT NULL,sent_count INTEGER NOT NULL DEFAULT 0,failed_count INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS admin_drafts(platform TEXT NOT NULL,user_id TEXT NOT NULL,kind TEXT NOT NULL,payload_json TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(platform,user_id));
         """)
         self.db.commit()
 
@@ -57,6 +58,16 @@ class Storage:
     def answers_with_questions(self, attempt_id:int) -> list[sqlite3.Row]: return self.db.execute("SELECT q.position,q.text,a.value_json FROM answers a JOIN questions q ON q.id=a.question_id WHERE a.attempt_id=? ORDER BY q.position",(attempt_id,)).fetchall()
     def stale_attempts(self, cutoff: int) -> list[sqlite3.Row]: return self.db.execute("SELECT * FROM attempts WHERE status='active' AND last_activity_at<=? AND snapshot_version=0",(cutoff,)).fetchall()
     def users(self, platform: str | None=None) -> Iterable[sqlite3.Row]: return self.db.execute("SELECT * FROM users" + (" WHERE platform=?" if platform else ""), (() if not platform else (platform,)))
+    def set_draft(self, platform:str,user_id:str,kind:str,payload:dict[str,Any]) -> None:
+        with self.db:self.db.execute("INSERT INTO admin_drafts VALUES(?,?,?,?,?) ON CONFLICT(platform,user_id) DO UPDATE SET kind=excluded.kind,payload_json=excluded.payload_json,updated_at=excluded.updated_at",(platform,user_id,kind,json.dumps(payload,ensure_ascii=False),int(time.time())))
+    def draft(self, platform:str,user_id:str) -> tuple[str,dict[str,Any]]|None:
+        row=self._one('SELECT kind,payload_json FROM admin_drafts WHERE platform=? AND user_id=?',(platform,user_id)); return (row['kind'],json.loads(row['payload_json'])) if row else None
+    def clear_draft(self, platform:str,user_id:str) -> None:
+        with self.db:self.db.execute('DELETE FROM admin_drafts WHERE platform=? AND user_id=?',(platform,user_id))
+    def create_broadcast(self, platform:str, user_id:str, target:str, payload:dict[str,Any], buttons:list[list[dict[str,str]]]) -> int:
+        with self.db:return self.db.execute('INSERT INTO broadcasts(platform,source_platform,source_user_id,payload_json,buttons_json,created_at) VALUES(?,?,?,?,?,?)',(target,platform,user_id,json.dumps(payload,ensure_ascii=False),json.dumps(buttons,ensure_ascii=False),int(time.time()))).lastrowid
+    def complete_broadcast(self, bid:int, ok:int, failed:int) -> None:
+        with self.db:self.db.execute('UPDATE broadcasts SET sent_count=?,failed_count=? WHERE id=?',(ok,failed,bid))
     def stats(self, inactivity_seconds: int = 1800) -> dict[str, Any]:
         now=int(time.time()); day=now-86400; week=now-604800; month=now-2592000
         count=lambda q,a=(): self._one(q,a)[0]
