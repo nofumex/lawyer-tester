@@ -48,7 +48,12 @@ class Admin:
   if data.startswith('a:delq:') or data.startswith('a:delo:'):
    table='questions' if ':delq:' in data else 'options';self.s.db.execute(f'DELETE FROM {table} WHERE id=?',(data.split(':')[2],));self.s.db.commit();return self.menu()
   if data=='a:stats':
-   x=self.s.stats();return f"Пользователи: {x['users']}\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nПереведено: {x['moved']}",HOME
+   x=self.s.detailed_stats(); plats=' | '.join(f"{k}: {v}" for k,v in x['platforms'].items()); return f"Пользователи: {x['users']} ({plats})\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nЗавершение: {x['completion_pct']}% | Среднее: {x['avg_seconds']} сек.\nПереведено: {x['moved']}\nРассылок: {sum(r['campaigns'] for r in x['broadcasts'])}",HOME
+  if data=='a:cast': return 'Кому отправить?',[[b('Telegram','a:castto:telegram'),b('MAX','a:castto:max')],[b('Обе платформы','a:castto:both')],[b('История','a:casthistory'),b('‹ Назад','a:home')]]
+  if data.startswith('a:castto:'):
+   self.s.set_draft(platform,user,'cast_text',{'target':data.split(':')[2],'buttons':[]});return 'Отправьте текст рассылки. Форматирование Telegram сохраняется при отправке HTML/entities.',[[b('Отмена','a:home')]]
+  if data=='a:casthistory':
+   rows=self.s.broadcast_history();return '\n'.join(f"#{r['id']} {r['platform']}: ✓{r['sent_count']} ✗{r['failed_count']}" for r in rows) or 'История пуста.',HOME
   return self.menu()
  def text(self,platform:str,user:str,text:str):
   d=self.s.draft(platform,user)
@@ -63,3 +68,14 @@ class Admin:
    if kind=='o_text':self.s.db.execute('UPDATE options SET text=? WHERE id=?',(text,i));return self.callback(platform,user,f'a:o:{i}')
    if kind=='o_pos':self.s.db.execute('UPDATE options SET position=? WHERE id=?',(int(text),i));return self.menu()
    if kind=='new_o':self.s.db.execute('INSERT INTO options(question_id,position,text) VALUES(?,COALESCE((SELECT MAX(position)+1 FROM options WHERE question_id=?),1),?)',(i,i,text));return self.callback(platform,user,f'a:opts:{i}')
+   if kind=='cast_text':
+    p['text']=text;self.s.set_draft(platform,user,'cast_confirm',p);return 'Предпросмотр:\n\n'+text,[[b('Отправить','a:castsend'),b('Отмена','a:home')]]
+ def deliver(self,platform:str,user:str,transport:Any)->str:
+  d=self.s.draft(platform,user)
+  if not d or d[0]!='cast_confirm': return 'Черновик рассылки не найден.'
+  _,p=d;bid=self.s.create_broadcast(platform,user,p['target'],{'kind':'text','text':p['text']},p['buttons']);ok=bad=0
+  for row in self.s.users(None if p['target']=='both' else p['target']):
+   if row['platform']!=transport.platform: continue
+   try: transport.send_broadcast(row['user_id'],{'kind':'text','text':p['text']},p['buttons']);ok+=1
+   except Exception: bad+=1
+  self.s.complete_broadcast(bid,ok,bad);self.s.clear_draft(platform,user);return f'Рассылка завершена: успешно {ok}, ошибок {bad}.'

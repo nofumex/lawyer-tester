@@ -11,6 +11,7 @@ class Transport(Protocol):
     platform: str
     def updates(self, offset: int, timeout: int) -> list[dict[str,Any]]: ...
     def send(self, user_id:str, text:str, *, keyboard:list[list[str]]|None=None, remove_keyboard:bool=False, inline:list[list[dict[str,str]]]|None=None) -> None: ...
+    def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None: ...
 
 
 @dataclass
@@ -32,6 +33,15 @@ class TelegramTransport:
         body={'chat_id':user_id,'text':text}
         if markup: body['reply_markup']=markup
         self._call('sendMessage',body)
+    def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None:
+        markup={'inline_keyboard':buttons} if buttons else None
+        kind=payload.get('kind','text'); text=payload.get('text',''); body={'chat_id':user_id,'caption' if kind!='text' else 'text':text}
+        if markup: body['reply_markup']=markup
+        if payload.get('entities') and kind=='text': body['entities']=payload['entities']
+        if kind=='text': self._call('sendMessage',body); return
+        method={'photo':'sendPhoto','video':'sendVideo','document':'sendDocument','audio':'sendAudio','animation':'sendAnimation'}.get(kind,'sendDocument')
+        body[kind if kind in {'photo','video','document','audio','animation'} else 'document']=payload['file_id']
+        self._call(method,body)
 
 
 @dataclass
@@ -48,9 +58,26 @@ class MaxTransport:
         params={'timeout':timeout,'limit':100,'types':['message_created','message_callback','bot_started']}
         if self.marker is not None: params['marker']=self.marker
         data=self._call('/updates?'+urlencode(params,doseq=True)); self.marker=data.get('marker',self.marker)
-        return data.get('updates',[])
+        return [self.normalize_update(x) for x in data.get('updates',[])]
     def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:
         # MAX supports inline keyboards; the payload is platform-native, unlike Telegram reply_markup.
         body={'user_id':int(user_id),'text':text}
         if inline: body['attachments']=[{'type':'inline_keyboard','payload':{'buttons':inline}}]
         self._call('/messages',body)
+    def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None:
+        body={'user_id':int(user_id),'text':payload.get('text','')}
+        # MAX accepts uploaded media tokens in attachments; upload itself is deliberately
+        # delegated to its official multipart /uploads flow by the deployment adapter.
+        if payload.get('media_token'): body['attachments']=[{'type':payload.get('kind','file'),'payload':{'token':payload['media_token']}}]
+        if buttons: body.setdefault('attachments',[]).append({'type':'inline_keyboard','payload':{'buttons':buttons}})
+        self._call('/messages',body)
+    @staticmethod
+    def normalize_update(update:dict[str,Any]) -> dict[str,Any]:
+        typ=update.get('update_type'); user=update.get('user') or {}; uid=str(user.get('user_id') or user.get('id') or '')
+        if typ=='bot_started': return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'from':{'id':uid,'first_name':user.get('name','')},'chat':{'id':update.get('chat_id',uid)},'text':'/start'}}
+        if typ=='message_created':
+            msg=update.get('message') or {}; sender=msg.get('sender') or user
+            return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}
+        if typ=='message_callback':
+            cb=update.get('callback') or {}; return {'update_id':update.get('marker',update.get('timestamp',0)),'callback_query':{'from':{'id':uid,'first_name':user.get('name','')},'data':cb.get('payload') or cb.get('data',''),'message':{'chat':{'id':update.get('chat_id',uid)}}}}
+        return {'update_id':update.get('marker',update.get('timestamp',0))}

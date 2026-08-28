@@ -27,6 +27,8 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         return
     if callback and callback.startswith('a:'):
         if is_admin:
+            if callback=='a:castsend':
+                transport.send(user_id,admin.deliver(transport.platform,user_id,transport)); return
             reply,keyboard=admin.callback(transport.platform,user_id,callback); transport.send(user_id,reply,inline=keyboard)
         return
     if text=='/admin':

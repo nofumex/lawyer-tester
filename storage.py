@@ -68,6 +68,17 @@ class Storage:
         with self.db:return self.db.execute('INSERT INTO broadcasts(platform,source_platform,source_user_id,payload_json,buttons_json,created_at) VALUES(?,?,?,?,?,?)',(target,platform,user_id,json.dumps(payload,ensure_ascii=False),json.dumps(buttons,ensure_ascii=False),int(time.time()))).lastrowid
     def complete_broadcast(self, bid:int, ok:int, failed:int) -> None:
         with self.db:self.db.execute('UPDATE broadcasts SET sent_count=?,failed_count=? WHERE id=?',(ok,failed,bid))
+    def broadcast_history(self) -> list[sqlite3.Row]: return self.db.execute('SELECT * FROM broadcasts ORDER BY id DESC LIMIT 20').fetchall()
+    def detailed_stats(self, inactivity_seconds:int=1800) -> dict[str,Any]:
+        base=self.stats(inactivity_seconds)
+        base['platforms']={r['platform']:r['n'] for r in self.db.execute('SELECT platform,count(*) n FROM users GROUP BY platform')}
+        base['completion_pct']=round(100*base['completed']/base['started'],1) if base['started'] else 0
+        row=self._one("SELECT avg(last_activity_at-started_at) FROM attempts WHERE status='completed'"); base['avg_seconds']=round(row[0] or 0)
+        last=self._one('SELECT q.position,q.text,count(*) n FROM attempts a JOIN questions q ON q.id=a.current_question_id GROUP BY q.id ORDER BY n DESC LIMIT 1');base['last_question']=dict(last) if last else None
+        base['questions']=[dict(r) for r in self.db.execute('SELECT q.position,q.text,count(a.id) answers FROM questions q LEFT JOIN answers a ON a.question_id=q.id GROUP BY q.id ORDER BY q.position')]
+        base['options']=[dict(r) for r in self.db.execute("SELECT o.question_id,o.position,o.text,count(a.id) answers FROM options o LEFT JOIN answers a ON a.question_id=o.question_id AND (a.value_json='\"'||o.text||'\"' OR a.value_json LIKE '%"+'"'+"'||o.text||'"+'"'+"%') GROUP BY o.id ORDER BY o.question_id,o.position")]
+        base['broadcasts']=[dict(r) for r in self.db.execute('SELECT platform,sum(sent_count) sent,sum(failed_count) failed,count(*) campaigns FROM broadcasts GROUP BY platform')]
+        return base
     def stats(self, inactivity_seconds: int = 1800) -> dict[str, Any]:
         now=int(time.time()); day=now-86400; week=now-604800; month=now-2592000
         count=lambda q,a=(): self._one(q,a)[0]
