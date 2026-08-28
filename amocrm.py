@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -65,11 +66,60 @@ class AmoClient:
         raise AmoError(f"Target amoCRM stage not found: {pipeline_name} / {status_name}")
 
     def find_lead(self, full_name: str, phone: str) -> int | None:
-        """Returns an ID only for one unambiguous candidate; never guesses."""
-        queries = [x for x in (phone, full_name) if x]
-        ids: set[int] | None = None
-        for query in queries:
-            data = self.request("GET", "/api/v4/leads", params={"query": query, "limit": 50, "with": "contacts"})
-            found = {int(x["id"]) for x in data.get("_embedded", {}).get("leads", [])}
-            ids = found if ids is None else ids & found
-        return next(iter(ids)) if ids and len(ids) == 1 else None
+        """Find an exact identity match without ever selecting an ambiguous lead.
+
+        Phone has priority.  Name is a fallback only when phone finds no exact
+        match; names are compared as an unordered set of normalised words.
+        """
+        normal_phone = self._phone(phone)
+        if normal_phone:
+            matches = self._matching_leads(normal_phone, lambda c: normal_phone in self._contact_phones(c))
+            if len(matches) == 1:
+                return next(iter(matches))
+            if len(matches) > 1:
+                LOG.warning("Ambiguous amoCRM phone match (%d leads); not binding", len(matches))
+                return None
+        name_words = self._name_words(full_name)
+        if not name_words:
+            return None
+        # Search every word: amoCRM may index a contact under any FIO order.
+        candidates: set[int] = set()
+        for word in name_words:
+            candidates |= self._matching_leads(word, lambda c: self._name_words(self._contact_name(c)) == name_words)
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        if len(candidates) > 1:
+            LOG.warning("Ambiguous amoCRM name match (%d leads); not binding", len(candidates))
+        return None
+
+    @staticmethod
+    def _phone(value: str) -> str:
+        digits = re.sub(r"\D", "", value)
+        if len(digits) == 11 and digits[0] in "78": digits = digits[1:]
+        return digits if len(digits) == 10 else ""
+
+    @staticmethod
+    def _name_words(value: str) -> tuple[str, ...]:
+        return tuple(sorted(re.findall(r"[а-яa-z]+", value.casefold().replace("ё", "е"))))
+
+    @staticmethod
+    def _contact_name(contact: dict[str, Any]) -> str:
+        values = [str(contact.get("name") or "")]
+        for field in contact.get("custom_fields_values") or []:
+            if field.get("field_code") in {"FULL_NAME", "NAME"}:
+                values.extend(str(v.get("value") or "") for v in field.get("values") or [])
+        return " ".join(values)
+
+    def _contact_phones(self, contact: dict[str, Any]) -> set[str]:
+        return {self._phone(str(v.get("value") or "")) for field in contact.get("custom_fields_values") or []
+                if field.get("field_code") == "PHONE" for v in field.get("values") or []} - {""}
+
+    def _matching_leads(self, query: str, predicate: Any) -> set[int]:
+        data = self.request("GET", "/api/v4/leads", params={"query": query, "limit": 250, "with": "contacts"})
+        leads = data.get("_embedded", {}).get("leads", [])
+        ids = {int(link["id"]) for lead in leads for link in lead.get("_embedded", {}).get("contacts", [])}
+        contacts: dict[int, dict[str, Any]] = {}
+        for cid in ids:
+            item = self.request("GET", f"/api/v4/contacts/{cid}")
+            contacts[cid] = item
+        return {int(lead["id"]) for lead in leads if any(predicate(contacts[int(link["id"])]) for link in lead.get("_embedded", {}).get("contacts", []) if int(link["id"]) in contacts)}

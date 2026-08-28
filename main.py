@@ -37,8 +37,10 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         if prompt: transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
         return
     reply,prompt=engine.receive(transport.platform,user_id,text)
-    transport.send(user_id,reply,keyboard=prompt.keyboard if prompt else None,remove_keyboard=bool(prompt and prompt.remove_keyboard) or prompt is None)
-    if prompt: transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
+    if prompt:
+        transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
+    else:
+        transport.send(user_id,reply,remove_keyboard=True)
 
 
 def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config) -> None:
