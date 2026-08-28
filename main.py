@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from html import escape
 
 from admin import Admin
 from amocrm import AmoClient
@@ -40,7 +41,10 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         reply,keyboard=result; transport.send(user_id,reply,inline=keyboard); return
     if text=='/start':
         greeting,prompt=engine.begin(transport.platform,user_id,name)
-        if prompt: transport.send(user_id,f"<b>{greeting}</b>\n\n{prompt.text}",keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
+        if prompt:
+            first_attempt = greeting != 'Продолжаем незавершённое тестирование.'
+            message = f"<b>{escape(greeting)}</b>\n\n{prompt.text}" if first_attempt else f"Продолжаем незавершённое тестирование.\n\n{prompt.text}"
+            transport.send(user_id,message,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
         else: transport.send(user_id,greeting)
         return
     reply,prompt=engine.receive(transport.platform,user_id,text)

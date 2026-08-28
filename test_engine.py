@@ -25,7 +25,7 @@ class SurveyTests(unittest.TestCase):
         _,prompt=self.engine.begin('telegram','7','Ivan'); self.assertTrue(prompt.remove_keyboard)
         self.engine.receive('telegram','7','Иванов Иван')
         _,prompt=self.engine.begin('telegram','7','Ivan')
-        self.assertEqual(prompt.text, 'Номер телефона')
+        self.assertEqual(prompt.text, '<b>Номер телефона</b>')
     def test_multi_choice_needs_confirmation(self):
         test=self.store.enabled_test()['id']; questions=self.store.test_questions(test)
         self.assertEqual(len(questions),22)

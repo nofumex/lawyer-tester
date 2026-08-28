@@ -30,7 +30,7 @@ class TelegramTransport:
         if keyboard is not None: markup={'keyboard':keyboard,'resize_keyboard':True,'one_time_keyboard':False}
         if remove_keyboard: markup={'remove_keyboard':True}
         if inline: markup={'inline_keyboard':inline}
-        body={'chat_id':user_id,'text':text}
+        body={'chat_id':user_id,'text':text,'parse_mode':'HTML'}
         if markup: body['reply_markup']=markup
         self._call('sendMessage',body)
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None:

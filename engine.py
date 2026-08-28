@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from html import escape
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -44,9 +45,9 @@ class SurveyEngine:
         if not attempt['current_question_id']: return None
         q=self.store._one('SELECT * FROM questions WHERE id=?',(attempt['current_question_id'],))
         if not q: return None
-        question=q['text'].replace('*','').rstrip()
-        if q['kind']=='text': return Prompt(question,None,True)
-        opts=self.store.options(q['id']); numbered='\n'.join(f"{i}. {x['text']}" for i,x in enumerate(opts,1))
+        question=escape(q['text'].replace('*','').rstrip())
+        if q['kind']=='text': return Prompt(f"<b>{question}</b>",None,True)
+        opts=self.store.options(q['id']); numbered='\n'.join(f"{i}. {escape(x['text'])}" for i,x in enumerate(opts,1))
         keys=[[str(i)] for i in range(1,len(opts)+1)]
         if q['kind']=='multi_choice': keys.append(['Готово'])
         return Prompt(f"<b>{question}</b>\n\n{numbered}",keys)
