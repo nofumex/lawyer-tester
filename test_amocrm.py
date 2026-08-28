@@ -25,5 +25,8 @@ class AmoFindLeadTests(unittest.TestCase):
         self.assertEqual(client.queries,['9990000000'])
     def test_name_is_unordered_fallback(self):
         client=Client(); self.assertEqual(client.find_lead('Иванов Иван',''),3)
+    def test_empty_amocrm_result_is_not_an_error(self):
+        client=Client(); client.request=lambda *args, **kwargs: None
+        self.assertIsNone(client.find_lead('Иванов Иван','79990000000'))
 
 if __name__ == '__main__': unittest.main()

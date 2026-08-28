@@ -128,7 +128,8 @@ class AmoClient:
 
     def _matching_leads(self, query: str, predicate: Any) -> set[int]:
         data = self.request("GET", "/api/v4/leads", params={"query": query, "limit": 250, "with": "contacts"})
-        leads = data.get("_embedded", {}).get("leads", [])
+        # amoCRM can return an empty response for a query with no matches.
+        leads = (data or {}).get("_embedded", {}).get("leads", [])
         ids = {int(link["id"]) for lead in leads for link in lead.get("_embedded", {}).get("contacts", [])}
         contacts: dict[int, dict[str, Any]] = {}
         for cid in ids:
