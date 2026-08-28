@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
 
 class Transport(Protocol):
@@ -35,12 +36,21 @@ class TelegramTransport:
 
 @dataclass
 class MaxTransport:
-    """Adapter boundary. Configure a MAX gateway implementing /updates and /messages."""
+    """Official MAX Bot API long-polling adapter (platform-api2.max.ru)."""
     token:str
     base_url:str
     platform:str='max'
-    def _call(self,path:str,body:dict[str,Any]) -> Any:
-        request=Request(self.base_url+path,data=json.dumps(body,ensure_ascii=False).encode(),headers={'Authorization':f'Bearer {self.token}','Content-Type':'application/json'},method='POST')
+    marker: int | None = None
+    def _call(self,path:str,body:dict[str,Any]|None=None) -> Any:
+        request=Request(self.base_url+path,data=json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers={'Authorization':f'Bearer {self.token}','Content-Type':'application/json'} if body is not None else {'Authorization':f'Bearer {self.token}'},method='POST' if body is not None else 'GET')
         with urlopen(request,timeout=35) as response: return json.loads(response.read())
-    def updates(self,offset:int,timeout:int) -> list[dict[str,Any]]: return self._call('/updates',{'offset':offset,'timeout':timeout}).get('updates',[])
-    def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None: self._call('/messages',{'user_id':user_id,'text':text,'keyboard':keyboard,'remove_keyboard':remove_keyboard,'inline_keyboard':inline})
+    def updates(self,offset:int,timeout:int) -> list[dict[str,Any]]:
+        params={'timeout':timeout,'limit':100,'types':['message_created','message_callback','bot_started']}
+        if self.marker is not None: params['marker']=self.marker
+        data=self._call('/updates?'+urlencode(params,doseq=True)); self.marker=data.get('marker',self.marker)
+        return data.get('updates',[])
+    def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:
+        # MAX supports inline keyboards; the payload is platform-native, unlike Telegram reply_markup.
+        body={'user_id':int(user_id),'text':text}
+        if inline: body['attachments']=[{'type':'inline_keyboard','payload':{'buttons':inline}}]
+        self._call('/messages',body)

@@ -31,5 +31,7 @@ class SurveyTests(unittest.TestCase):
         self.assertEqual(len(questions),22)
         q=questions[9]; self.assertEqual(q['kind'],'multi_choice')
         self.assertEqual(len(self.store.options(q['id'])),4)
+        self.assertEqual(self.store.test_questions(test)[17]['kind'],'multi_choice')
+        self.assertEqual(self.store.test_questions(test)[18]['kind'],'multi_choice')
 
 if __name__=='__main__': unittest.main()

@@ -36,7 +36,7 @@ class Config:
             database_path=os.getenv("DATABASE_PATH", "lawyer_tester.sqlite3"),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             max_token=os.getenv("MAX_BOT_TOKEN", "").strip(),
-            max_api_base_url=os.getenv("MAX_API_BASE_URL", "").rstrip("/"),
+            max_api_base_url=os.getenv("MAX_API_BASE_URL", "https://platform-api2.max.ru").rstrip("/"),
             admin_ids=frozenset(x.strip() for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()),
             amo_base_url=os.getenv("AMOCRM_BASE_URL", "").rstrip("/"),
             amo_token=os.getenv("AMOCRM_ACCESS_TOKEN", "").strip(),
