@@ -23,7 +23,7 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     callback_query=update.get('callback_query') or {}
     text=(update.get('message') or {}).get('text','').strip()
     is_admin=user_id in config.admin_ids
-    if callback and callback.startswith('survey:'):
+    if callback and (callback.startswith('survey:') or callback.startswith('review:')):
         reply,prompt,edit=engine.receive_callback(transport.platform,user_id,callback)
         if callback_query.get('id'): transport.answer_callback(str(callback_query['id']),'' if prompt else reply)
         if prompt:
@@ -42,14 +42,23 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
                 transport.send(user_id,admin.deliver(transport.platform,user_id,transport)); return
             reply,keyboard=admin.callback(transport.platform,user_id,callback); transport.send(user_id,reply,inline=keyboard)
         return
+    if text.startswith('/test_search'):
+        if not is_admin: transport.send(user_id,'Недостаточно прав.');return
+        query=text.partition(' ')[2].strip()
+        if not query:transport.send(user_id,'Использование: /test_search Фамилия Имя Отчество');return
+        try:
+            lead=engine.crm.find_lead(query,'') if engine.crm else None
+            transport.send(user_id,(f'Найдена сделка: <a href="{config.amo_base_url}/leads/detail/{lead}">#{lead}</a>' if lead else 'Однозначное совпадение не найдено.'))
+        except Exception:logging.exception('test_search failed');transport.send(user_id,'Ошибка поиска amoCRM. Подробности записаны в лог.')
+        return
     if text=='/admin':
         if is_admin:
+            admin.s.clear_draft(transport.platform,user_id)
             reply,keyboard=admin.menu(); transport.send(user_id,reply,inline=keyboard)
         else: transport.send(user_id,'Недостаточно прав.')
         return
-    if is_admin and (result:=admin.text(transport.platform,user_id,text)):
-        reply,keyboard=result; transport.send(user_id,reply,inline=keyboard); return
     if text=='/start':
+        if is_admin: admin.s.clear_draft(transport.platform,user_id)
         greeting,prompt=engine.begin(transport.platform,user_id,name)
         if prompt:
             first_attempt = greeting != 'Продолжаем незавершённое тестирование.'
@@ -57,6 +66,8 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
             transport.send(user_id,message,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
         else: transport.send(user_id,greeting)
         return
+    if is_admin and (result:=admin.text(transport.platform,user_id,text)):
+        reply,keyboard=result; transport.send(user_id,reply,inline=keyboard); return
     reply,prompt=engine.receive(transport.platform,user_id,text)
     if prompt:
         transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
@@ -75,7 +86,12 @@ def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:
             continue
         for update in updates:
             offset=max(offset,int(update.get('update_id',0))+1)
-            try: handle(transport,update,engine,admin,config)
+            try:
+                handle(transport,update,engine,admin,config)
+                incoming=update.get('message') or {}
+                if incoming.get('message_id'):
+                    try:transport.delete(str(incoming.get('chat',{}).get('id') or incoming.get('from',{}).get('id')),str(incoming['message_id']))
+                    except Exception:logging.debug('Cannot delete incoming message',exc_info=True)
             except Exception: logging.exception('Update processing failed (%s)',transport.platform)
         if time.time()-last_snapshot>60:
             engine.send_snapshots(int(time.time())-config.inactivity_seconds); last_snapshot=time.time()
@@ -86,7 +102,7 @@ def main() -> int:
     logging.basicConfig(level=getattr(logging, __import__('os').getenv('LOG_LEVEL','INFO').upper(),logging.INFO),format='%(asctime)s %(levelname)s %(message)s')
     store=Storage(config.database_path); seed_default_test(store)
     crm=AmoClient(config.amo_base_url,config.amo_token) if config.amo_base_url and config.amo_token else None
-    engine=SurveyEngine(store,crm,config.target_pipeline,config.target_status); admin=Admin(store)
+    engine=SurveyEngine(store,crm,config.target_pipeline,config.target_status); engine.resume_crm(); admin=Admin(store,config.amo_base_url)
     transports:list[Transport]=[]
     if config.telegram_token: transports.append(TelegramTransport(config.telegram_token))
     if config.max_token and config.max_api_base_url: transports.append(MaxTransport(config.max_token,config.max_api_base_url))

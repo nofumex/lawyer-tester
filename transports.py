@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from typing import Any, Protocol
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
@@ -14,12 +14,14 @@ class Transport(Protocol):
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None: ...
     def answer_callback(self,callback_id:str,text:str='') -> None: ...
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None: ...
+    def delete(self,user_id:str,message_id:str) -> None: ...
 
 
 @dataclass
 class TelegramTransport:
     token: str
     platform: str = 'telegram'
+    _last_message:dict[str,int]=field(default_factory=dict,init=False,repr=False)
     def _call(self, method:str, body:dict[str,Any]) -> Any:
         request=Request(f'https://api.telegram.org/bot{self.token}/{method}',data=json.dumps(body,ensure_ascii=False).encode(),headers={'Content-Type':'application/json'},method='POST')
         with urlopen(request,timeout=35) as result:
@@ -34,7 +36,12 @@ class TelegramTransport:
         if inline: markup={'inline_keyboard':inline}
         body={'chat_id':user_id,'text':text,'parse_mode':'HTML'}
         if markup: body['reply_markup']=markup
-        self._call('sendMessage',body)
+        result=self._call('sendMessage',body)
+        previous=self._last_message.get(str(user_id));current=int(result['message_id'])
+        self._last_message[str(user_id)]=current
+        if previous and previous!=current:
+            try:self._call('deleteMessage',{'chat_id':user_id,'message_id':previous})
+            except Exception:pass
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None:
         markup={'inline_keyboard':buttons} if buttons else None
         kind=payload.get('kind','text'); text=payload.get('text',''); body={'chat_id':user_id,'caption' if kind!='text' else 'text':text}
@@ -47,6 +54,8 @@ class TelegramTransport:
     def answer_callback(self,callback_id:str,text:str='') -> None: self._call('answerCallbackQuery',{'callback_query_id':callback_id,'text':text[:200]})
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
         self._call('editMessageText',{'chat_id':user_id,'message_id':message_id,'text':text,'parse_mode':'HTML','reply_markup':{'inline_keyboard':inline}})
+        self._last_message[str(user_id)]=int(message_id)
+    def delete(self,user_id:str,message_id:str)->None:self._call('deleteMessage',{'chat_id':user_id,'message_id':message_id})
 
 
 @dataclass
@@ -78,13 +87,14 @@ class MaxTransport:
         self._call('/messages',body)
     def answer_callback(self,callback_id:str,text:str='') -> None: self._call('/answers?'+urlencode({'callback_id':callback_id}),{'notification':text} if text else {})
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None: self.send(user_id,text,inline=inline)
+    def delete(self,user_id:str,message_id:str)->None:return None
     @staticmethod
     def normalize_update(update:dict[str,Any]) -> dict[str,Any]:
         typ=update.get('update_type'); user=update.get('user') or {}; uid=str(user.get('user_id') or user.get('id') or '')
         if typ=='bot_started': return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'from':{'id':uid,'first_name':user.get('name','')},'chat':{'id':update.get('chat_id',uid)},'text':'/start'}}
         if typ=='message_created':
             msg=update.get('message') or {}; sender=msg.get('sender') or user
-            return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}
+            return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}
         if typ=='message_callback':
             cb=update.get('callback') or {}; msg=update.get('message') or {}; return {'update_id':update.get('marker',update.get('timestamp',0)),'callback_query':{'id':cb.get('callback_id',''),'from':{'id':uid,'first_name':user.get('name','')},'data':cb.get('payload') or cb.get('data',''),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'chat':{'id':update.get('chat_id',uid)}}}}
         return {'update_id':update.get('marker',update.get('timestamp',0))}

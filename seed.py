@@ -33,7 +33,9 @@ def seed_default_test(s:Storage):
   cnt=s._one('SELECT count(*) FROM questions WHERE test_id=?',(test['id'],))[0]; attempts=s._one('SELECT count(*) FROM attempts WHERE test_id=?',(test['id'],))[0]
   # Upgrade the previous seed as well as the earlier wrong single-choice 18/19.
   old_types=[r['kind'] for r in s.test_questions(test['id'])]
-  if cnt==len(Q) and old_types[17:19]==['multi_choice','multi_choice']:return
+  if cnt==len(Q) and old_types[17:19]==['multi_choice','multi_choice']:
+   with s.db:s.db.execute('UPDATE options SET action_json=? WHERE text=?',(json.dumps({'type':'move_stage','pipeline':'HH-юристы','status':'готов к сотрудничеству'},ensure_ascii=False),SPECIAL_ANSWER))
+   return
   if attempts:return
   with s.db:s.db.execute('DELETE FROM questions WHERE test_id=?',(test['id'],));_insert(s,test['id'])
   return

@@ -28,6 +28,14 @@ class Storage:
         """)
         if 'amo_created' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
             self.db.execute('ALTER TABLE attempts ADD COLUMN amo_created INTEGER NOT NULL DEFAULT 0')
+        if 'amo_link_in_progress' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
+            self.db.execute('ALTER TABLE attempts ADD COLUMN amo_link_in_progress INTEGER NOT NULL DEFAULT 0')
+        if 'edit_question_id' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
+            self.db.execute('ALTER TABLE attempts ADD COLUMN edit_question_id INTEGER')
+        if 'review_confirmed' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
+            self.db.execute('ALTER TABLE attempts ADD COLUMN review_confirmed INTEGER NOT NULL DEFAULT 0')
+        self.db.execute('UPDATE attempts SET amo_link_in_progress=0 WHERE amo_link_in_progress=1 AND amo_lead_id IS NULL')
+        self.db.commit()
         self.db.commit()
 
     def _one(self, sql: str, args: tuple = ()) -> sqlite3.Row | None: return self.db.execute(sql,args).fetchone()
@@ -48,10 +56,22 @@ class Storage:
                 self.db.execute("UPDATE attempts SET current_question_id=?,last_activity_at=?,status=?,snapshot_version=0 WHERE id=?",(next_question_id,now,'completed' if completed else 'active',attempt_id))
             return True
         except sqlite3.IntegrityError: return False
+    def replace_answer(self,attempt_id:int,question_id:int,value:Any)->None:
+        now=int(time.time())
+        with self.db:
+            self.db.execute('INSERT INTO answers(attempt_id,question_id,value_json,answered_at) VALUES(?,?,?,?) ON CONFLICT(attempt_id,question_id) DO UPDATE SET value_json=excluded.value_json,answered_at=excluded.answered_at',(attempt_id,question_id,json.dumps(value,ensure_ascii=False),now))
+            self.db.execute("UPDATE attempts SET status='completed',current_question_id=NULL,edit_question_id=NULL,last_activity_at=? WHERE id=?",(now,attempt_id))
+            self.db.execute('DELETE FROM draft_answers WHERE attempt_id=? AND question_id=?',(attempt_id,question_id))
     def set_identity(self, attempt_id:int, full_name: str | None=None, phone: str | None=None, lead_id: int | None=None, amo_created:bool|None=None) -> None:
         row=self._one("SELECT full_name,phone,amo_lead_id FROM attempts WHERE id=?",(attempt_id,)); assert row
         self.db.execute("UPDATE attempts SET full_name=?,phone=?,amo_lead_id=?,amo_created=COALESCE(?,amo_created) WHERE id=?",(full_name or row['full_name'],phone or row['phone'],lead_id if lead_id is not None else row['amo_lead_id'],None if amo_created is None else int(amo_created),attempt_id)); self.db.commit()
     def mark(self, attempt_id:int, column:str, value: int=1) -> None: self.db.execute(f"UPDATE attempts SET {column}=? WHERE id=?",(value,attempt_id)); self.db.commit()
+    def claim_amo_link(self,attempt_id:int)->bool:
+        with self.db:
+            cursor=self.db.execute('UPDATE attempts SET amo_link_in_progress=1 WHERE id=? AND amo_lead_id IS NULL AND amo_link_in_progress=0',(attempt_id,))
+        return cursor.rowcount==1
+    def release_amo_link(self,attempt_id:int)->None:
+        with self.db:self.db.execute('UPDATE attempts SET amo_link_in_progress=0 WHERE id=?',(attempt_id,))
     def claim_action(self, attempt_id:int, option_id:int, action_type:str) -> bool:
         try:
             with self.db: self.db.execute('INSERT INTO action_executions VALUES(?,?,?,?)',(attempt_id,option_id,action_type,int(time.time())))
@@ -80,7 +100,9 @@ class Storage:
         base['questions']=[dict(r) for r in self.db.execute('SELECT q.position,q.text,count(a.id) answers FROM questions q LEFT JOIN answers a ON a.question_id=q.id GROUP BY q.id ORDER BY q.position')]
         base['options']=[dict(r) for r in self.db.execute("SELECT o.question_id,o.position,o.text,count(a.id) answers FROM options o LEFT JOIN answers a ON a.question_id=o.question_id AND (a.value_json='\"'||o.text||'\"' OR a.value_json LIKE '%"+'"'+"'||o.text||'"+'"'+"%') GROUP BY o.id ORDER BY o.question_id,o.position")]
         base['broadcasts']=[dict(r) for r in self.db.execute('SELECT platform,sum(sent_count) sent,sum(failed_count) failed,count(*) campaigns FROM broadcasts GROUP BY platform')]
+        base['created_leads']=self._one('SELECT count(*) FROM attempts WHERE amo_created=1 AND amo_lead_id IS NOT NULL')[0]
         return base
+    def created_leads(self)->list[sqlite3.Row]:return self.db.execute('SELECT id,full_name,phone,amo_lead_id,started_at FROM attempts WHERE amo_created=1 AND amo_lead_id IS NOT NULL ORDER BY id DESC').fetchall()
     def stats(self, inactivity_seconds: int = 1800) -> dict[str, Any]:
         now=int(time.time()); day=now-86400; week=now-604800; month=now-2592000
         count=lambda q,a=(): self._one(q,a)[0]

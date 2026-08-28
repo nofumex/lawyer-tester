@@ -71,9 +71,10 @@ class AmoClient:
         Phone has priority.  Name is a fallback only when phone finds no exact
         match; names are compared as an unordered set of normalised words.
         """
+        pipeline_id,_=self.target_stage('HH-юристы','Новое')
         normal_phone = self._phone(phone)
         if normal_phone:
-            matches = self._matching_leads(normal_phone, lambda c: normal_phone in self._contact_phones(c))
+            matches = self._matching_leads(normal_phone, lambda c: normal_phone in self._contact_phones(c),pipeline_id)
             if len(matches) == 1:
                 return next(iter(matches))
             if len(matches) > 1:
@@ -84,21 +85,16 @@ class AmoClient:
             return None
         # Search every word: amoCRM may index a contact under any FIO order.
         candidates: set[int] = set()
-        for word in name_words:
-            candidates |= self._matching_leads(word, lambda c: self._name_words(self._contact_name(c)) == name_words)
+        for word in dict.fromkeys(name_words):
+            candidates |= self._matching_leads(word, lambda c: any(self._name_matches(name_words,self._name_words(name)) for name in self._contact_names(c)),pipeline_id)
         if len(candidates) == 1:
             return next(iter(candidates))
         if len(candidates) > 1:
             LOG.warning("Ambiguous amoCRM name match (%d leads); not binding", len(candidates))
         return None
-    def initial_stage(self) -> tuple[int,int]:
-        data=self.request('GET','/api/v4/leads/pipelines')
-        for p in data.get('_embedded',{}).get('pipelines',[]):
-            statuses=p.get('_embedded',{}).get('statuses',[])
-            if statuses:return int(p['id']),int(statuses[0]['id'])
-        raise AmoError('No amoCRM pipeline status available')
+    def stage(self,pipeline_name:str,status_name:str)->tuple[int,int]:return self.target_stage(pipeline_name,status_name)
     def create_candidate_lead(self, full_name:str, phone:str) -> int:
-        pipeline,status=self.initial_stage()
+        pipeline,status=self.stage('HH-юристы','Новое')
         contact=self.request('POST','/api/v4/contacts',body=[{'name':full_name,'custom_fields_values':[{'field_code':'PHONE','values':[{'value':phone}]}]}])
         cid=int(contact['_embedded']['contacts'][0]['id'])
         lead=self.request('POST','/api/v4/leads',body=[{'name':full_name,'pipeline_id':pipeline,'status_id':status,'_embedded':{'contacts':[{'id':cid}]}}])
@@ -115,24 +111,31 @@ class AmoClient:
         return tuple(sorted(re.findall(r"[а-яa-z]+", value.casefold().replace("ё", "е"))))
 
     @staticmethod
-    def _contact_name(contact: dict[str, Any]) -> str:
+    def _name_matches(query:tuple[str,...],contact:tuple[str,...])->bool:
+        # A missing patronymic in amoCRM is acceptable, but at least name and
+        # surname must match. Extra words in the CRM contact are not guessed.
+        return len(contact)>=2 and set(contact).issubset(set(query))
+
+    @staticmethod
+    def _contact_names(contact: dict[str, Any]) -> list[str]:
         values = [str(contact.get("name") or "")]
         for field in contact.get("custom_fields_values") or []:
             if field.get("field_code") in {"FULL_NAME", "NAME"}:
                 values.extend(str(v.get("value") or "") for v in field.get("values") or [])
-        return " ".join(values)
+        return [x for x in values if x]
 
     def _contact_phones(self, contact: dict[str, Any]) -> set[str]:
         return {self._phone(str(v.get("value") or "")) for field in contact.get("custom_fields_values") or []
                 if field.get("field_code") == "PHONE" for v in field.get("values") or []} - {""}
 
-    def _matching_leads(self, query: str, predicate: Any) -> set[int]:
-        data = self.request("GET", "/api/v4/leads", params={"query": query, "limit": 250, "with": "contacts"})
-        # amoCRM can return an empty response for a query with no matches.
-        leads = (data or {}).get("_embedded", {}).get("leads", [])
-        ids = {int(link["id"]) for lead in leads for link in lead.get("_embedded", {}).get("contacts", [])}
-        contacts: dict[int, dict[str, Any]] = {}
-        for cid in ids:
-            item = self.request("GET", f"/api/v4/contacts/{cid}")
-            contacts[cid] = item
-        return {int(lead["id"]) for lead in leads if any(predicate(contacts[int(link["id"])]) for link in lead.get("_embedded", {}).get("contacts", []) if int(link["id"]) in contacts)}
+    def _matching_leads(self, query: str, predicate: Any,pipeline_id:int) -> set[int]:
+        data=self.request('GET','/api/v4/contacts',params={'query':query,'with':'leads','limit':250})
+        contacts=(data or {}).get('_embedded',{}).get('contacts',[])
+        lead_ids=sorted({int(link['id']) for contact in contacts if predicate(contact) for link in contact.get('_embedded',{}).get('leads',[])})
+        if not lead_ids:return set()
+        result:set[int]=set()
+        for start in range(0,len(lead_ids),100):
+            batch=lead_ids[start:start+100];params={f'filter[id][{i}]':lead_id for i,lead_id in enumerate(batch)}
+            found=self.request('GET','/api/v4/leads',params=params|{'limit':250})
+            result|={int(lead['id']) for lead in (found or {}).get('_embedded',{}).get('leads',[]) if int(lead.get('pipeline_id') or 0)==pipeline_id}
+        return result

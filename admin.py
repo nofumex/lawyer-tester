@@ -7,7 +7,7 @@ def b(text:str,data:str)->dict[str,str]: return {'text':text,'callback_data':dat
 HOME=[[b('Тесты','a:tests'),b('Статистика','a:stats')],[b('Рассылка','a:cast')]]
 
 class Admin:
- def __init__(self,s:Storage): self.s=s
+ def __init__(self,s:Storage,amo_base_url:str=''): self.s=s;self.amo_base_url=amo_base_url.rstrip('/')
  def menu(self): return 'Админка',HOME
  def callback(self,platform:str,user:str,data:str)->tuple[str,list]|None:
   if data=='a:home':return self.menu()
@@ -48,7 +48,15 @@ class Admin:
   if data.startswith('a:delq:') or data.startswith('a:delo:'):
    table='questions' if ':delq:' in data else 'options';self.s.db.execute(f'DELETE FROM {table} WHERE id=?',(data.split(':')[2],));self.s.db.commit();return self.menu()
   if data=='a:stats':
-   x=self.s.detailed_stats(); plats=' | '.join(f"{k}: {v}" for k,v in x['platforms'].items()); return f"Пользователи: {x['users']} ({plats})\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nЗавершение: {x['completion_pct']}% | Среднее: {x['avg_seconds']} сек.\nПереведено: {x['moved']}\nРассылок: {sum(r['campaigns'] for r in x['broadcasts'])}",HOME
+   x=self.s.detailed_stats(); plats=' | '.join(f"{k}: {v}" for k,v in x['platforms'].items()); return f"Пользователи: {x['users']} ({plats})\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nЗавершение: {x['completion_pct']}% | Среднее: {x['avg_seconds']} сек.\nПереведено: {x['moved']}\nФИО не найдено, создана сделка: {x['created_leads']}\nРассылок: {sum(r['campaigns'] for r in x['broadcasts'])}",[[b(f"Созданные сделки ({x['created_leads']})",'a:created')],[b('‹ Назад','a:home')]]
+  if data=='a:created':
+   rows=self.s.created_leads();keys=[]
+   for r in rows:
+    button={'text':f"#{r['amo_lead_id']} {r['full_name'] or 'Без ФИО'}"}
+    if self.amo_base_url:button['url']=f"{self.amo_base_url}/leads/detail/{r['amo_lead_id']}"
+    else:button['callback_data']='a:created'
+    keys.append([button])
+   keys.append([b('‹ К статистике','a:stats')]);return 'Сделки, созданные при отсутствии совпадения:',keys
   if data=='a:cast': return 'Кому отправить?',[[b('Telegram','a:castto:telegram'),b('MAX','a:castto:max')],[b('Обе платформы','a:castto:both')],[b('История','a:casthistory'),b('‹ Назад','a:home')]]
   if data.startswith('a:castto:'):
    self.s.set_draft(platform,user,'cast_text',{'target':data.split(':')[2],'buttons':[]});return 'Отправьте текст рассылки. Форматирование Telegram сохраняется при отправке HTML/entities.',[[b('Отмена','a:home')]]
@@ -58,7 +66,7 @@ class Admin:
  def text(self,platform:str,user:str,text:str):
   d=self.s.draft(platform,user)
   if not d:return None
-  kind,p=d; self.s.clear_draft(platform,user); i=p['id']
+  kind,p=d; self.s.clear_draft(platform,user); i=p.get('id')
   with self.s.db:
    if kind=='rename_test':self.s.db.execute('UPDATE tests SET name=? WHERE id=?',(text,i));return self.callback(platform,user,f'a:test:{i}')
    if kind=='new_test':self.s.db.execute('INSERT INTO tests(name,enabled,created_at) VALUES(?,?,strftime("%s","now"))',(text,1));return self.callback(platform,user,'a:tests')
