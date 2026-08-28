@@ -26,6 +26,8 @@ class Storage:
         CREATE TABLE IF NOT EXISTS broadcasts(id INTEGER PRIMARY KEY,platform TEXT,source_platform TEXT NOT NULL,source_user_id TEXT NOT NULL,payload_json TEXT NOT NULL,buttons_json TEXT NOT NULL,created_at INTEGER NOT NULL,sent_count INTEGER NOT NULL DEFAULT 0,failed_count INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS admin_drafts(platform TEXT NOT NULL,user_id TEXT NOT NULL,kind TEXT NOT NULL,payload_json TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(platform,user_id));
         """)
+        if 'amo_created' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
+            self.db.execute('ALTER TABLE attempts ADD COLUMN amo_created INTEGER NOT NULL DEFAULT 0')
         self.db.commit()
 
     def _one(self, sql: str, args: tuple = ()) -> sqlite3.Row | None: return self.db.execute(sql,args).fetchone()
@@ -46,9 +48,9 @@ class Storage:
                 self.db.execute("UPDATE attempts SET current_question_id=?,last_activity_at=?,status=?,snapshot_version=0 WHERE id=?",(next_question_id,now,'completed' if completed else 'active',attempt_id))
             return True
         except sqlite3.IntegrityError: return False
-    def set_identity(self, attempt_id:int, full_name: str | None=None, phone: str | None=None, lead_id: int | None=None) -> None:
+    def set_identity(self, attempt_id:int, full_name: str | None=None, phone: str | None=None, lead_id: int | None=None, amo_created:bool|None=None) -> None:
         row=self._one("SELECT full_name,phone,amo_lead_id FROM attempts WHERE id=?",(attempt_id,)); assert row
-        self.db.execute("UPDATE attempts SET full_name=?,phone=?,amo_lead_id=? WHERE id=?",(full_name or row['full_name'],phone or row['phone'],lead_id if lead_id is not None else row['amo_lead_id'],attempt_id)); self.db.commit()
+        self.db.execute("UPDATE attempts SET full_name=?,phone=?,amo_lead_id=?,amo_created=COALESCE(?,amo_created) WHERE id=?",(full_name or row['full_name'],phone or row['phone'],lead_id if lead_id is not None else row['amo_lead_id'],None if amo_created is None else int(amo_created),attempt_id)); self.db.commit()
     def mark(self, attempt_id:int, column:str, value: int=1) -> None: self.db.execute(f"UPDATE attempts SET {column}=? WHERE id=?",(value,attempt_id)); self.db.commit()
     def claim_action(self, attempt_id:int, option_id:int, action_type:str) -> bool:
         try:

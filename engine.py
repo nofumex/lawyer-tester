@@ -14,6 +14,7 @@ LOG = logging.getLogger(__name__)
 class CRM(Protocol):
     def add_note(self, lead_id: int, text: str) -> None: ...
     def find_lead(self, full_name: str, phone: str) -> int | None: ...
+    def create_candidate_lead(self, full_name: str, phone: str) -> int: ...
     def target_stage(self, pipeline_name: str, status_name: str) -> tuple[int, int]: ...
     def move_lead(self, lead_id: int, pipeline_id: int, status_id: int) -> None: ...
 
@@ -43,11 +44,12 @@ class SurveyEngine:
         if not attempt['current_question_id']: return None
         q=self.store._one('SELECT * FROM questions WHERE id=?',(attempt['current_question_id'],))
         if not q: return None
-        if q['kind']=='text': return Prompt(q['text'],None,True)
+        question=q['text'].replace('*','').rstrip()
+        if q['kind']=='text': return Prompt(question,None,True)
         opts=self.store.options(q['id']); numbered='\n'.join(f"{i}. {x['text']}" for i,x in enumerate(opts,1))
         keys=[[str(i)] for i in range(1,len(opts)+1)]
         if q['kind']=='multi_choice': keys.append(['Готово'])
-        return Prompt(f"{q['text']}\n\n{numbered}",keys)
+        return Prompt(f"<b>{question}</b>\n\n{numbered}",keys)
 
     def receive(self, platform: str, user_id: str, text: str) -> tuple[str, Prompt | None]:
         attempt=self.store.active_attempt(platform,user_id)
@@ -82,6 +84,10 @@ class SurveyEngine:
         self._run_actions(updated,opts,value)
         if next_id is None:
             self._crm_note(updated,self.result_text(updated,True),'final_note_sent')
+            if updated['amo_created'] and updated['amo_lead_id']:
+                try:
+                    pipeline,status=self.crm.target_stage('Судебный приказ','Прошел тест'); self.crm.move_lead(int(updated['amo_lead_id']),pipeline,status)
+                except Exception: LOG.exception('Unable to move created lead after test')
             return "Спасибо! Тестирование завершено.",None
         return "Ответ сохранён.",self.prompt(updated)
 
@@ -99,7 +105,7 @@ class SurveyEngine:
             try:
                 lead=self.crm.find_lead(fresh['full_name'],fresh['phone'])
                 if lead: self.store.set_identity(attempt['id'],lead_id=lead)
-                else: LOG.warning('No unambiguous amoCRM lead for attempt %s',attempt['id'])
+                else: self.store.set_identity(attempt['id'],lead_id=self.crm.create_candidate_lead(fresh['full_name'],fresh['phone']),amo_created=True)
             except Exception: LOG.exception('Cannot find amoCRM lead for attempt %s',attempt['id'])
     def _crm_note(self, attempt:Any,text:str, flag:str) -> None:
         if not self.crm or not attempt['amo_lead_id'] or attempt[flag]: return

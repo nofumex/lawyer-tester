@@ -39,8 +39,9 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     if is_admin and (result:=admin.text(transport.platform,user_id,text)):
         reply,keyboard=result; transport.send(user_id,reply,inline=keyboard); return
     if text=='/start':
-        greeting,prompt=engine.begin(transport.platform,user_id,name); transport.send(user_id,greeting)
-        if prompt: transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
+        greeting,prompt=engine.begin(transport.platform,user_id,name)
+        if prompt: transport.send(user_id,f"<b>{greeting}</b>\n\n{prompt.text}",keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
+        else: transport.send(user_id,greeting)
         return
     reply,prompt=engine.receive(transport.platform,user_id,text)
     if prompt:

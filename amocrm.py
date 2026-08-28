@@ -91,6 +91,18 @@ class AmoClient:
         if len(candidates) > 1:
             LOG.warning("Ambiguous amoCRM name match (%d leads); not binding", len(candidates))
         return None
+    def initial_stage(self) -> tuple[int,int]:
+        data=self.request('GET','/api/v4/leads/pipelines')
+        for p in data.get('_embedded',{}).get('pipelines',[]):
+            statuses=p.get('_embedded',{}).get('statuses',[])
+            if statuses:return int(p['id']),int(statuses[0]['id'])
+        raise AmoError('No amoCRM pipeline status available')
+    def create_candidate_lead(self, full_name:str, phone:str) -> int:
+        pipeline,status=self.initial_stage()
+        contact=self.request('POST','/api/v4/contacts',body=[{'name':full_name,'custom_fields_values':[{'field_code':'PHONE','values':[{'value':phone}]}]}])
+        cid=int(contact['_embedded']['contacts'][0]['id'])
+        lead=self.request('POST','/api/v4/leads',body=[{'name':full_name,'pipeline_id':pipeline,'status_id':status,'_embedded':{'contacts':[{'id':cid}]}}])
+        return int(lead['_embedded']['leads'][0]['id'])
 
     @staticmethod
     def _phone(value: str) -> str:
