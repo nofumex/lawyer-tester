@@ -57,7 +57,13 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
 def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config) -> None:
     offset=0; last_snapshot=0
     while True:
-        for update in transport.updates(offset,config.poll_timeout):
+        try:
+            updates=transport.updates(offset,config.poll_timeout)
+        except Exception:
+            logging.exception('Cannot receive updates (%s). Check that only one bot process uses this token.',transport.platform)
+            time.sleep(3)
+            continue
+        for update in updates:
             offset=max(offset,int(update.get('update_id',0))+1)
             try: handle(transport,update,engine,admin,config)
             except Exception: logging.exception('Update processing failed (%s)',transport.platform)
