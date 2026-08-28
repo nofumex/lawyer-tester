@@ -81,7 +81,9 @@ def main() -> int:
     if config.telegram_token: transports.append(TelegramTransport(config.telegram_token))
     if config.max_token and config.max_api_base_url: transports.append(MaxTransport(config.max_token,config.max_api_base_url))
     if not transports: raise SystemExit('Configure TELEGRAM_BOT_TOKEN or MAX_BOT_TOKEN + MAX_API_BASE_URL')
-    if len(transports)>1: raise SystemExit('Run one transport per process; both share DATABASE_PATH safely.')
+    if len(transports)>1:
+        logging.warning('Both transports are configured; starting Telegram. Run MAX in a separate process to use its long polling.')
+        transports = [next(x for x in transports if x.platform == 'telegram')]
     run_transport(transports[0],engine,admin,config); return 0
 
 if __name__=='__main__': raise SystemExit(main())
