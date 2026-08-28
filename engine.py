@@ -25,6 +25,7 @@ class Prompt:
     text: str
     keyboard: list[list[str]] | None
     remove_keyboard: bool = False
+    inline: list[list[dict[str, str]]] | None = None
 
 
 class SurveyEngine:
@@ -48,9 +49,36 @@ class SurveyEngine:
         question=escape(q['text'].replace('*','').rstrip())
         if q['kind']=='text': return Prompt(f"<b>{question}</b>",None,True)
         opts=self.store.options(q['id']); numbered='\n'.join(f"{i}. {escape(x['text'])}" for i,x in enumerate(opts,1))
-        keys=[ [str(i) for i in range(1, len(opts)+1)] ]
-        if q['kind']=='multi_choice': keys.append(['Готово'])
-        return Prompt(f"<b>{question}</b>\n\n{numbered}",keys)
+        selected=set(self._selected(attempt['id'],q['id'])) if q['kind']=='multi_choice' else set()
+        buttons=[]
+        for i,opt in enumerate(opts,1):
+            mark='✅' if opt['text'] in selected else ('☐' if q['kind']=='multi_choice' else '•')
+            buttons.append({'text':f'{mark} {i}','callback_data':f'survey:pick:{attempt["id"]}:{q["id"]}:{opt["id"]}'})
+        rows=[buttons[i:i+3] for i in range(0,len(buttons),3)]
+        if q['kind']=='multi_choice': rows.append([{'text':'Готово','callback_data':f'survey:done:{attempt["id"]}:{q["id"]}'}])
+        return Prompt(f"<b>{question}</b>\n\n{numbered}",None,True,rows)
+
+    def receive_callback(self, platform:str,user_id:str,data:str) -> tuple[str,Prompt|None,bool]:
+        parts=data.split(':')
+        if len(parts)<4 or parts[0]!='survey': return 'Кнопка устарела.',None,False
+        action,attempt_id,question_id=parts[1],int(parts[2]),int(parts[3])
+        attempt=self.store.active_attempt(platform,user_id)
+        if not attempt or attempt['id']!=attempt_id or attempt['current_question_id']!=question_id:
+            return 'Этот вопрос уже обработан.',self.prompt(attempt) if attempt else None,False
+        q=self.store._one('SELECT * FROM questions WHERE id=?',(question_id,)); opts=self.store.options(question_id)
+        if action=='pick':
+            if len(parts)!=5: return 'Некорректная кнопка.',self.prompt(attempt),False
+            option=next((x for x in opts if x['id']==int(parts[4])),None)
+            if not option:return 'Вариант больше недоступен.',self.prompt(attempt),False
+            if q['kind']=='multi_choice':
+                selected=self._selected(attempt_id,question_id)
+                selected.remove(option['text']) if option['text'] in selected else selected.append(option['text'])
+                self._set_selected(attempt_id,question_id,selected)
+                return 'Выбор обновлён.',self.prompt(attempt),True
+            reply,prompt=self.receive(platform,user_id,str(opts.index(option)+1));return reply,prompt,False
+        if action=='done' and q['kind']=='multi_choice':
+            reply,prompt=self.receive(platform,user_id,'Готово');return reply,prompt,False
+        return 'Некорректная кнопка.',self.prompt(attempt),False
 
     def receive(self, platform: str, user_id: str, text: str) -> tuple[str, Prompt | None]:
         attempt=self.store.active_attempt(platform,user_id)

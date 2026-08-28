@@ -20,8 +20,18 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     if not user_id: return
     name=' '.join(filter(None,[sender.get('first_name'),sender.get('last_name')])) or sender.get('username')
     callback=(update.get('callback_query') or {}).get('data')
+    callback_query=update.get('callback_query') or {}
     text=(update.get('message') or {}).get('text','').strip()
     is_admin=user_id in config.admin_ids
+    if callback and callback.startswith('survey:'):
+        reply,prompt,edit=engine.receive_callback(transport.platform,user_id,callback)
+        if callback_query.get('id'): transport.answer_callback(str(callback_query['id']),'' if prompt else reply)
+        if prompt:
+            if edit and callback_query.get('message',{}).get('message_id'):
+                transport.edit(user_id,str(callback_query['message']['message_id']),prompt.text,prompt.inline or [])
+            else: transport.send(user_id,prompt.text,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
+        elif reply: transport.send(user_id,reply,remove_keyboard=True)
+        return
     if callback and callback.startswith('admin:'):
         if is_admin:
             reply,keyboard=admin.callback(callback); transport.send(user_id,reply,inline=keyboard)
@@ -44,12 +54,12 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         if prompt:
             first_attempt = greeting != 'Продолжаем незавершённое тестирование.'
             message = f"<b>{escape(greeting)}</b>\n\n{prompt.text}" if first_attempt else f"Продолжаем незавершённое тестирование.\n\n{prompt.text}"
-            transport.send(user_id,message,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
+            transport.send(user_id,message,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
         else: transport.send(user_id,greeting)
         return
     reply,prompt=engine.receive(transport.platform,user_id,text)
     if prompt:
-        transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard)
+        transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
     else:
         transport.send(user_id,reply,remove_keyboard=True)
 

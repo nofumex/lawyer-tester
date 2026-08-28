@@ -12,6 +12,8 @@ class Transport(Protocol):
     def updates(self, offset: int, timeout: int) -> list[dict[str,Any]]: ...
     def send(self, user_id:str, text:str, *, keyboard:list[list[str]]|None=None, remove_keyboard:bool=False, inline:list[list[dict[str,str]]]|None=None) -> None: ...
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None: ...
+    def answer_callback(self,callback_id:str,text:str='') -> None: ...
+    def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None: ...
 
 
 @dataclass
@@ -42,6 +44,9 @@ class TelegramTransport:
         method={'photo':'sendPhoto','video':'sendVideo','document':'sendDocument','audio':'sendAudio','animation':'sendAnimation'}.get(kind,'sendDocument')
         body[kind if kind in {'photo','video','document','audio','animation'} else 'document']=payload['file_id']
         self._call(method,body)
+    def answer_callback(self,callback_id:str,text:str='') -> None: self._call('answerCallbackQuery',{'callback_query_id':callback_id,'text':text[:200]})
+    def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
+        self._call('editMessageText',{'chat_id':user_id,'message_id':message_id,'text':text,'parse_mode':'HTML','reply_markup':{'inline_keyboard':inline}})
 
 
 @dataclass
@@ -71,6 +76,8 @@ class MaxTransport:
         if payload.get('media_token'): body['attachments']=[{'type':payload.get('kind','file'),'payload':{'token':payload['media_token']}}]
         if buttons: body.setdefault('attachments',[]).append({'type':'inline_keyboard','payload':{'buttons':buttons}})
         self._call('/messages',body)
+    def answer_callback(self,callback_id:str,text:str='') -> None: self._call('/answers?'+urlencode({'callback_id':callback_id}),{'notification':text} if text else {})
+    def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None: self.send(user_id,text,inline=inline)
     @staticmethod
     def normalize_update(update:dict[str,Any]) -> dict[str,Any]:
         typ=update.get('update_type'); user=update.get('user') or {}; uid=str(user.get('user_id') or user.get('id') or '')
@@ -79,5 +86,5 @@ class MaxTransport:
             msg=update.get('message') or {}; sender=msg.get('sender') or user
             return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}
         if typ=='message_callback':
-            cb=update.get('callback') or {}; return {'update_id':update.get('marker',update.get('timestamp',0)),'callback_query':{'from':{'id':uid,'first_name':user.get('name','')},'data':cb.get('payload') or cb.get('data',''),'message':{'chat':{'id':update.get('chat_id',uid)}}}}
+            cb=update.get('callback') or {}; msg=update.get('message') or {}; return {'update_id':update.get('marker',update.get('timestamp',0)),'callback_query':{'id':cb.get('callback_id',''),'from':{'id':uid,'first_name':user.get('name','')},'data':cb.get('payload') or cb.get('data',''),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'chat':{'id':update.get('chat_id',uid)}}}}
         return {'update_id':update.get('marker',update.get('timestamp',0))}

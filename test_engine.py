@@ -14,6 +14,7 @@ class FakeCRM:
     def add_note(self,lead,text): self.notes.append((lead,text))
     def target_stage(self,pipeline,status): return (1,2)
     def move_lead(self,lead,pipeline,status): self.moves.append((lead,pipeline,status))
+    def create_candidate_lead(self,name,phone): return 43
 
 
 class SurveyTests(unittest.TestCase):
@@ -33,5 +34,16 @@ class SurveyTests(unittest.TestCase):
         self.assertEqual(len(self.store.options(q['id'])),4)
         self.assertEqual(self.store.test_questions(test)[17]['kind'],'multi_choice')
         self.assertEqual(self.store.test_questions(test)[18]['kind'],'multi_choice')
+    def test_multi_choice_inline_toggle_and_done(self):
+        test=self.store.enabled_test()['id']; q=self.store.test_questions(test)[9]
+        attempt=self.store.start_attempt('telegram','88',test)
+        self.store.db.execute('UPDATE attempts SET current_question_id=? WHERE id=?',(q['id'],attempt['id']));self.store.db.commit()
+        attempt=self.store.active_attempt('telegram','88'); prompt=self.engine.prompt(attempt)
+        self.assertIsNone(prompt.keyboard);self.assertTrue(prompt.inline[-1][0]['text']=='Готово')
+        option=self.store.options(q['id'])[0]
+        _,prompt,edit=self.engine.receive_callback('telegram','88',f'survey:pick:{attempt["id"]}:{q["id"]}:{option["id"]}')
+        self.assertTrue(edit);self.assertEqual(prompt.inline[0][0]['text'],'✅ 1')
+        _,next_prompt,_=self.engine.receive_callback('telegram','88',f'survey:done:{attempt["id"]}:{q["id"]}')
+        self.assertIn('Выберите условие',next_prompt.text)
 
 if __name__=='__main__': unittest.main()
