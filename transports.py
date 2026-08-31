@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 
 class Transport(Protocol):
     platform: str
-    def updates(self, offset: int, timeout: int) -> list[dict[str,Any]]: ...
+    def updates(self, offset: int | str | None, timeout: int) -> list[dict[str,Any]]: ...
     def send(self, user_id:str, text:str, *, keyboard:list[list[str]]|None=None, remove_keyboard:bool=False, inline:list[list[dict[str,str]]]|None=None) -> None: ...
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None: ...
     def answer_callback(self,callback_id:str,text:str='') -> None: ...
@@ -28,7 +28,10 @@ class TelegramTransport:
             data=json.loads(result.read())
         if not data.get('ok'): raise RuntimeError(str(data))
         return data['result']
-    def updates(self,offset:int,timeout:int) -> list[dict[str,Any]]: return self._call('getUpdates',{'offset':offset,'timeout':timeout,'allowed_updates':['message','callback_query']})
+    def updates(self,offset:int | str | None,timeout:int) -> list[dict[str,Any]]:
+        body={'timeout':timeout,'allowed_updates':['message','callback_query']}
+        if offset is not None: body['offset']=int(offset)
+        return self._call('getUpdates',body)
     def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:
         markup=None
         if keyboard is not None: markup={'keyboard':keyboard,'resize_keyboard':True,'one_time_keyboard':False}
@@ -64,7 +67,7 @@ class MaxTransport:
     token:str
     base_url:str
     platform:str='max'
-    marker: int | None = None
+    marker: str | int | None = None
     def _call(self,path:str,body:dict[str,Any]|None=None,method:str|None=None) -> Any:
         # MAX expects the access token itself in Authorization, not an HTTP Bearer
         # credential.  JSON is sent only for methods with a request body.
@@ -77,10 +80,10 @@ class MaxTransport:
         if isinstance(result,dict) and result.get('success') is False:
             raise RuntimeError(result.get('message','MAX API request failed'))
         return result
-    def updates(self,offset:int,timeout:int) -> list[dict[str,Any]]:
+    def updates(self,offset:int | str | None,timeout:int) -> list[dict[str,Any]]:
         params={'timeout':timeout,'limit':100,'types':'message_created,message_callback,bot_started'}
-        if self.marker is not None: params['marker']=self.marker
-        data=self._call('/updates?'+urlencode(params,doseq=True)); self.marker=data.get('marker',self.marker)
+        if offset is not None: params['marker']=str(offset)
+        data=self._call('/updates?'+urlencode(params,doseq=True)); self.marker=data.get('marker')
         return [self.normalize_update(x) for x in data.get('updates',[])]
     def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:
         body={'text':text,'format':'html'}
@@ -104,7 +107,7 @@ class MaxTransport:
         self._call('/messages?'+urlencode({'user_id':int(user_id)}),body)
     @staticmethod
     def _inline_buttons(buttons:list[list[dict[str,str]]]) -> list[list[dict[str,str]]]:
-        return [[{'type':'callback','text':button['text'],'payload':button['callback_data']} for button in row] for row in buttons]
+        return [[({'type':'link','text':button['text'],'url':button['url']} if button.get('url') else {'type':'callback','text':button['text'],'payload':button['callback_data']}) for button in row] for row in buttons]
     def answer_callback(self,callback_id:str,text:str='') -> None:
         body={'notification':text} if text else {}
         self._call('/answers?'+urlencode({'callback_id':callback_id}),body)
@@ -116,11 +119,13 @@ class MaxTransport:
     @staticmethod
     def normalize_update(update:dict[str,Any]) -> dict[str,Any]:
         typ=update.get('update_type'); user=update.get('user') or {}; uid=str(user.get('user_id') or user.get('id') or '')
-        if typ=='bot_started': return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'from':{'id':uid,'first_name':user.get('name','')},'chat':{'id':update.get('chat_id',uid)},'text':'/start'}}
+        msg=update.get('message') or {}; cb=update.get('callback') or {}
+        event_id=str(update.get('update_id') or update.get('id') or cb.get('callback_id') or msg.get('body',{}).get('mid') or msg.get('message_id') or f'{typ}:{update.get("timestamp", "")}:{uid}')
+        if typ=='bot_started': return {'update_id':update.get('marker',update.get('timestamp',0)),'_event_id':event_id,'message':{'from':{'id':uid,'first_name':user.get('name','')},'chat':{'id':update.get('chat_id',uid)},'text':'/start'}}
         if typ=='message_created':
             msg=update.get('message') or {}; sender=msg.get('sender') or user
-            return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}
+            return {'update_id':update.get('marker',update.get('timestamp',0)),'_event_id':event_id,'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}
         if typ=='message_callback':
             cb=update.get('callback') or {}; msg=update.get('message') or {}; sender=cb.get('user') or user
-            return {'update_id':update.get('marker',update.get('timestamp',0)),'callback_query':{'id':cb.get('callback_id',''),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'data':cb.get('payload',''),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'chat':{'id':msg.get('recipient',{}).get('chat_id',update.get('chat_id',uid))}}}}
+            return {'update_id':update.get('marker',update.get('timestamp',0)),'_event_id':event_id,'callback_query':{'id':cb.get('callback_id',''),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'data':cb.get('payload',''),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'chat':{'id':msg.get('recipient',{}).get('chat_id',update.get('chat_id',uid))}}}}
         return {'update_id':update.get('marker',update.get('timestamp',0))}

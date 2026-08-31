@@ -26,6 +26,10 @@ class _LockedConnection:
         with self._lock:
             self._connection.commit()
 
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
     def __enter__(self) -> sqlite3.Connection:
         self._lock.acquire()
         return self._connection.__enter__()
@@ -55,6 +59,9 @@ class Storage:
         CREATE TABLE IF NOT EXISTS action_executions(attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,option_id INTEGER NOT NULL REFERENCES options(id) ON DELETE CASCADE,action_type TEXT NOT NULL,executed_at INTEGER NOT NULL,PRIMARY KEY(attempt_id,option_id,action_type));
         CREATE TABLE IF NOT EXISTS broadcasts(id INTEGER PRIMARY KEY,platform TEXT,source_platform TEXT NOT NULL,source_user_id TEXT NOT NULL,payload_json TEXT NOT NULL,buttons_json TEXT NOT NULL,created_at INTEGER NOT NULL,sent_count INTEGER NOT NULL DEFAULT 0,failed_count INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS admin_drafts(platform TEXT NOT NULL,user_id TEXT NOT NULL,kind TEXT NOT NULL,payload_json TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(platform,user_id));
+        CREATE TABLE IF NOT EXISTS poll_cursors(platform TEXT PRIMARY KEY,cursor TEXT NOT NULL,updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS incoming_updates(platform TEXT NOT NULL,update_key TEXT NOT NULL,processed_at INTEGER NOT NULL,PRIMARY KEY(platform,update_key));
+        CREATE TABLE IF NOT EXISTS crm_operations(operation_key TEXT PRIMARY KEY,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
         """)
         if 'amo_created' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
             self.db.execute('ALTER TABLE attempts ADD COLUMN amo_created INTEGER NOT NULL DEFAULT 0')
@@ -66,10 +73,47 @@ class Storage:
             self.db.execute('ALTER TABLE attempts ADD COLUMN review_confirmed INTEGER NOT NULL DEFAULT 0')
         self.db.execute('UPDATE attempts SET amo_link_in_progress=0 WHERE amo_link_in_progress=1 AND amo_lead_id IS NULL')
         self.db.commit()
-        self.db.commit()
         self.db = _LockedConnection(self.db)
 
     def _one(self, sql: str, args: tuple = ()) -> sqlite3.Row | None: return self.db.execute(sql,args).fetchone()
+    def poll_cursor(self, platform: str) -> str | None:
+        row=self._one('SELECT cursor FROM poll_cursors WHERE platform=?',(platform,))
+        return str(row['cursor']) if row else None
+    def set_poll_cursor(self, platform: str, cursor: str | int) -> None:
+        with self.db:
+            self.db.execute('INSERT INTO poll_cursors VALUES(?,?,?) ON CONFLICT(platform) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at',(platform,str(cursor),int(time.time())))
+    def complete_update(self, platform: str, update_key: str, cursor: str | int | None=None) -> bool:
+        """Durably remember a successfully handled provider update and its cursor."""
+        try:
+            with self.db:
+                self.db.execute('INSERT INTO incoming_updates VALUES(?,?,?)',(platform,update_key,int(time.time())))
+                if cursor is not None:
+                    self.db.execute('INSERT INTO poll_cursors VALUES(?,?,?) ON CONFLICT(platform) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at',(platform,str(cursor),int(time.time())))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+    def update_processed(self, platform: str, update_key: str) -> bool:
+        return self._one('SELECT 1 FROM incoming_updates WHERE platform=? AND update_key=?',(platform,update_key)) is not None
+    def claim_crm_operation(self, operation_key: str) -> bool:
+        """Claim one external CRM side effect; completed/running claims survive restarts."""
+        now=int(time.time())
+        with self.db:
+            row=self._one('SELECT state FROM crm_operations WHERE operation_key=?',(operation_key,))
+            if row is None:
+                self.db.execute('INSERT INTO crm_operations VALUES(?,?,?,?)',(operation_key,'running',now,now))
+                return True
+            if row['state']=='failed':
+                self.db.execute("UPDATE crm_operations SET state='running',updated_at=? WHERE operation_key=?",(now,operation_key))
+                return True
+            return False
+    def finish_crm_operation(self, operation_key: str) -> None:
+        with self.db:self.db.execute("UPDATE crm_operations SET state='done',updated_at=? WHERE operation_key=?",(int(time.time()),operation_key))
+    def fail_crm_operation(self, operation_key: str) -> None:
+        # A definite transport/API failure may be retried; an interrupted call is
+        # intentionally retained as running to prevent a duplicate side effect.
+        with self.db:self.db.execute("UPDATE crm_operations SET state='failed',updated_at=? WHERE operation_key=?",(int(time.time()),operation_key))
+    def close(self) -> None:
+        self.db.close()
     def touch_user(self, platform: str, user_id: str, name: str | None) -> None:
         now=int(time.time()); self.db.execute("INSERT INTO users VALUES(?,?,?,?,?) ON CONFLICT(platform,user_id) DO UPDATE SET display_name=excluded.display_name,last_seen_at=excluded.last_seen_at",(platform,user_id,name,now,now)); self.db.commit()
     def enabled_test(self) -> sqlite3.Row | None: return self._one("SELECT * FROM tests WHERE enabled=1 ORDER BY id LIMIT 1")

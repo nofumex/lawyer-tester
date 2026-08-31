@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 import threading
 import time
 from html import escape
@@ -76,29 +77,47 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         transport.send(user_id,reply,remove_keyboard=True)
 
 
-def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config, processing_lock:threading.RLock, run_snapshots:bool=False) -> None:
-    offset=0; last_snapshot=0
-    while True:
+def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config, processing_lock:threading.RLock, run_snapshots:bool=False, stop_event:threading.Event|None=None) -> None:
+    stop_event=stop_event or threading.Event()
+    stored_cursor=engine.store.poll_cursor(transport.platform)
+    offset=int(stored_cursor) if transport.platform=='telegram' and stored_cursor is not None else None
+    last_snapshot=0
+    while not stop_event.is_set():
         try:
             updates=transport.updates(offset,config.poll_timeout)
         except Exception:
             logging.exception('Cannot receive updates (%s). Check that only one bot process uses this token.',transport.platform)
-            time.sleep(3)
+            stop_event.wait(3)
             continue
+        batch_ok=True
         for update in updates:
-            offset=max(offset,int(update.get('update_id',0))+1)
             try:
                 # Storage and the CRM client are shared by both polling workers.  The
                 # lock makes each update an atomic unit for this process and avoids
                 # concurrent use of the single SQLite connection.
                 with processing_lock:
+                    update_key=str(update.get('_event_id') or update.get('update_id') or '')
+                    if not update_key or engine.store.update_processed(transport.platform,update_key):
+                        continue
                     handle(transport,update,engine,admin,config)
                     incoming=update.get('message') or {}
                     if incoming.get('message_id'):
                         try:transport.delete(str(incoming.get('chat',{}).get('id') or incoming.get('from',{}).get('id')),str(incoming['message_id']))
                         except Exception:logging.debug('Cannot delete incoming message',exc_info=True)
-            except Exception: logging.exception('Update processing failed (%s)',transport.platform)
-        if run_snapshots and time.time()-last_snapshot>60:
+                    if transport.platform=='telegram':
+                        offset=max(offset or 0,int(update['update_id'])+1)
+                        engine.store.complete_update(transport.platform,update_key,offset)
+                    else:
+                        engine.store.complete_update(transport.platform,update_key)
+            except Exception:
+                logging.exception('Update processing failed (%s)',transport.platform)
+                batch_ok=False
+        # A MAX marker acknowledges the whole fetched page.  Save it only after
+        # every event has completed; per-event de-duplication makes replay safe.
+        if transport.platform=='max' and batch_ok and getattr(transport,'marker',None) is not None:
+            engine.store.set_poll_cursor(transport.platform,transport.marker)
+            offset=transport.marker
+        if run_snapshots and not stop_event.is_set() and time.time()-last_snapshot>60:
             with processing_lock:
                 engine.send_snapshots(int(time.time())-config.inactivity_seconds)
             last_snapshot=time.time()
@@ -114,14 +133,20 @@ def main() -> int:
     if config.telegram_token: transports.append(TelegramTransport(config.telegram_token))
     if config.max_token and config.max_api_base_url: transports.append(MaxTransport(config.max_token,config.max_api_base_url))
     if not transports: raise SystemExit('Configure TELEGRAM_BOT_TOKEN or MAX_BOT_TOKEN + MAX_API_BASE_URL')
-    processing_lock=threading.RLock()
+    processing_lock=threading.RLock(); stop_event=threading.Event()
+    def request_stop(signum: int, frame: object) -> None:
+        logging.info('Received signal %s; stopping polling',signum); stop_event.set()
+    for sig in (signal.SIGINT, signal.SIGTERM): signal.signal(sig,request_stop)
     workers=[threading.Thread(
         target=run_transport,
-        args=(transport,engine,admin,config,processing_lock,index == 0),
+        args=(transport,engine,admin,config,processing_lock,index == 0,stop_event),
         name=f'{transport.platform}-polling',
     ) for index,transport in enumerate(transports)]
     for worker in workers: worker.start()
-    for worker in workers: worker.join()
+    try:
+        for worker in workers: worker.join()
+    finally:
+        stop_event.set(); engine.shutdown(); store.close()
     return 0
 
 if __name__=='__main__': raise SystemExit(main())
