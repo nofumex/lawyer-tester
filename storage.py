@@ -179,10 +179,10 @@ class Storage:
         base['options']=[dict(r) for r in self.db.execute("SELECT o.question_id,o.position,o.text,count(a.id) answers FROM options o LEFT JOIN answers a ON a.question_id=o.question_id AND (a.value_json='\"'||o.text||'\"' OR a.value_json LIKE '%"+'"'+"'||o.text||'"+'"'+"%') GROUP BY o.id ORDER BY o.question_id,o.position")]
         base['broadcasts']=[dict(r) for r in self.db.execute('SELECT platform,sum(sent_count) sent,sum(failed_count) failed,count(*) campaigns FROM broadcasts GROUP BY platform')]
         base['created_leads']=self._one('SELECT count(*) FROM attempts WHERE amo_created=1 AND amo_lead_id IS NOT NULL')[0]
-        base['moved_found_leads']=self._one("SELECT count(DISTINCT a.id) FROM attempts a JOIN action_executions e ON e.attempt_id=a.id WHERE e.action_type='move_stage' AND a.amo_created=0 AND a.amo_lead_id IS NOT NULL")[0]
+        base['moved_found_leads']=self._one("SELECT count(DISTINCT a.id) FROM attempts a JOIN action_executions e ON e.attempt_id=a.id WHERE e.action_type='move_stage' AND a.amo_lead_id IS NOT NULL")[0]
         return base
     def created_leads(self, limit:int=10, offset:int=0)->list[sqlite3.Row]:return self.db.execute('SELECT id,full_name,phone,amo_lead_id,started_at FROM attempts WHERE amo_created=1 AND amo_lead_id IS NOT NULL ORDER BY id DESC LIMIT ? OFFSET ?',(limit,offset)).fetchall()
-    def moved_found_leads(self, limit:int=10, offset:int=0)->list[sqlite3.Row]:return self.db.execute("SELECT DISTINCT a.id,a.full_name,a.phone,a.amo_lead_id,a.started_at FROM attempts a JOIN action_executions e ON e.attempt_id=a.id WHERE e.action_type='move_stage' AND a.amo_created=0 AND a.amo_lead_id IS NOT NULL ORDER BY a.id DESC LIMIT ? OFFSET ?",(limit,offset)).fetchall()
+    def moved_found_leads(self, limit:int=10, offset:int=0)->list[sqlite3.Row]:return self.db.execute("SELECT DISTINCT a.id,a.full_name,a.phone,a.amo_lead_id,a.started_at FROM attempts a JOIN action_executions e ON e.attempt_id=a.id WHERE e.action_type='move_stage' AND a.amo_lead_id IS NOT NULL ORDER BY a.id DESC LIMIT ? OFFSET ?",(limit,offset)).fetchall()
     def stats(self, inactivity_seconds: int = 1800) -> dict[str, Any]:
         now=int(time.time()); day=now-86400; week=now-604800; month=now-2592000
         count=lambda q,a=(): self._one(q,a)[0]

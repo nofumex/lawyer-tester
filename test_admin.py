@@ -46,13 +46,14 @@ class AdminLeadListTests(unittest.TestCase):
         self.assertEqual(buttons[-2][0]['callback_data'],'a:created:1')
         self.assertIn('Страница 1 из 2',text)
         self.assertTrue(lead_buttons[0][0]['url'].endswith('/leads/detail/111'))
-    def test_moved_found_leads_are_paginated_and_exclude_created(self):
+    def test_moved_leads_are_paginated_and_match_moved_count(self):
         for lead_id in range(200,211):self._attempt(lead_id,created=False,moved=True)
         self._attempt(300,created=True,moved=True)
         text,buttons=self.admin.callback('telegram','admin','a:moved:1')
         lead_buttons=[row for row in buttons if row[0].get('url')]
-        self.assertEqual(len(lead_buttons),1)
-        self.assertEqual(lead_buttons[0][0]['text'],'#200 User 200')
+        self.assertEqual(len(lead_buttons),2)
+        self.assertEqual(lead_buttons[0][0]['text'],'#201 User 201')
+        self.assertEqual(self.store.detailed_stats()['moved_found_leads'],self.store.stats()['moved'])
         self.assertEqual(buttons[-2][0]['callback_data'],'a:moved:0')
         self.assertIn('Страница 2 из 2',text)
 
