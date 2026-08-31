@@ -39,7 +39,7 @@ class Transport(Protocol):
     def updates(self, offset: int | str | None, timeout: int) -> list[dict[str,Any]]: ...
     def send(self, user_id:str, text:str, *, keyboard:list[list[str]]|None=None, remove_keyboard:bool=False, inline:list[list[dict[str,str]]]|None=None) -> None: ...
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None: ...
-    def answer_callback(self,callback_id:str,text:str='') -> None: ...
+    def answer_callback(self,callback_id:str,text:str='',*,inline:list[list[dict[str,str]]]|None=None) -> None: ...
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None: ...
     def delete(self,user_id:str,message_id:str) -> None: ...
 
@@ -81,7 +81,7 @@ class TelegramTransport:
         method={'photo':'sendPhoto','video':'sendVideo','document':'sendDocument','audio':'sendAudio','animation':'sendAnimation'}.get(kind,'sendDocument')
         body[kind if kind in {'photo','video','document','audio','animation'} else 'document']=payload['file_id']
         self._call(method,body)
-    def answer_callback(self,callback_id:str,text:str='') -> None: self._call('answerCallbackQuery',{'callback_query_id':callback_id,'text':text[:200]})
+    def answer_callback(self,callback_id:str,text:str='',*,inline:list[list[dict[str,str]]]|None=None) -> None: self._call('answerCallbackQuery',{'callback_query_id':callback_id,'text':text[:200]})
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
         self._call('editMessageText',{'chat_id':user_id,'message_id':message_id,'text':text,'parse_mode':'HTML','reply_markup':{'inline_keyboard':inline}})
         self._last_message[str(user_id)]=int(message_id)
@@ -136,20 +136,23 @@ class MaxTransport:
     @staticmethod
     def _inline_buttons(buttons:list[list[dict[str,str]]]) -> list[list[dict[str,str]]]:
         return [[({'type':'link','text':button['text'],'url':button['url']} if button.get('url') else {'type':'callback','text':button['text'],'payload':button['callback_data']}) for button in row] for row in buttons]
-    def answer_callback(self,callback_id:str,text:str='') -> None:
+    def _message_body(self,text:str,inline:list[list[dict[str,str]]]|None=None) -> dict[str,Any]:
+        body={'text':text,'format':'html'}
+        if inline is not None:
+            body['attachments']=[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}] if inline else []
+        return body
+    def answer_callback(self,callback_id:str,text:str='',*,inline:list[list[dict[str,str]]]|None=None) -> None:
         path='/answers?'+urlencode({'callback_id':callback_id})
         try:
-            if text:
-                self._call(path,{'notification':text})
-            else:
-                self._call(path,{'message':None})
+            message=self._message_body(text,inline) if text or inline is not None else None
+            self._call(path,{'message':message})
         except HTTPError as exc:
             if exc.code != 400:
                 raise
             body=exc.read().decode('utf-8','replace') if exc.fp else ''
             LOG.warning('MAX callback answer failed: status=%s body=%s',exc.code,body)
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
-        body={'text':text,'format':'html','attachments':[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}] if inline else []}
+        body=self._message_body(text,inline)
         try:
             self._call('/messages?'+urlencode({'message_id':message_id}),body,method='PUT')
         except HTTPError as exc:

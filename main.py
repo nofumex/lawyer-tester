@@ -15,9 +15,9 @@ from storage import Storage
 from transports import MaxTransport, TelegramTransport, Transport
 
 
-def answer_callback_best_effort(transport:Transport, callback_id:str, text:str='') -> None:
+def answer_callback_best_effort(transport:Transport, callback_id:str, text:str='', *, inline:list[list[dict[str,str]]]|None=None) -> None:
     try:
-        transport.answer_callback(callback_id,text)
+        transport.answer_callback(callback_id,text,inline=inline)
     except Exception:
         logging.warning('Callback acknowledgement failed (%s); continuing update processing',transport.platform,exc_info=True)
 
@@ -34,11 +34,18 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     is_admin=user_id in config.admin_ids
     if callback and (callback.startswith('survey:') or callback.startswith('review:')):
         reply,prompt,edit=engine.receive_callback(transport.platform,user_id,callback)
-        if callback_query.get('id'): answer_callback_best_effort(transport,str(callback_query['id']),'' if prompt else reply)
+        max_callback_edit=transport.platform=='max' and prompt is not None and edit and prompt.inline is not None
+        if callback_query.get('id'):
+            if max_callback_edit:
+                answer_callback_best_effort(transport,str(callback_query['id']),prompt.text,inline=prompt.inline)
+            else:
+                answer_callback_best_effort(transport,str(callback_query['id']),'' if prompt or transport.platform=='max' else reply)
         if prompt:
-            if edit and callback_query.get('message',{}).get('message_id'):
+            if max_callback_edit:
+                pass
+            elif transport.platform!='max' and edit and callback_query.get('message',{}).get('message_id'):
                 transport.edit(user_id,str(callback_query['message']['message_id']),prompt.text,prompt.inline or [])
-            else: transport.send(user_id,prompt.text,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
+            else: transport.send(user_id,prompt.text,keyboard=prompt.keyboard if transport.platform=='max' else None,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
         elif reply: transport.send(user_id,reply,remove_keyboard=True)
         return
     if callback and callback.startswith('admin:'):

@@ -43,7 +43,7 @@ class MaxTransportTests(unittest.TestCase):
         self.assertEqual((edit.get_method(), edit.full_url), ('PUT', 'https://max.example/messages?message_id=mid-1'))
         self.assertEqual((delete.get_method(), delete.full_url), ('DELETE', 'https://max.example/messages?message_id=mid-1'))
         self.assertEqual((callback.get_method(), callback.full_url), ('POST', 'https://max.example/answers?callback_id=cb-1'))
-        self.assertEqual(json.loads(callback.data), {'notification': 'Done'})
+        self.assertEqual(json.loads(callback.data), {'message': {'text': 'Done', 'format': 'html'}})
 
     def test_empty_callback_ack_sends_nullable_message_body(self):
         with patch('transports.urlopen', self.request):
@@ -72,6 +72,15 @@ class MaxTransportTests(unittest.TestCase):
             self.transport.edit('42', 'mid-1', 'Done', [])
         body = json.loads(self.requests[0].data)
         self.assertEqual(body['attachments'], [])
+
+    def test_callback_answer_can_update_message_with_inline_buttons(self):
+        with patch('transports.urlopen', self.request):
+            self.transport.answer_callback('cb-edit', 'Changed', inline=[[{'text':'Next','callback_data':'survey:next'}]])
+        body = json.loads(self.requests[0].data)
+        self.assertEqual(body['message']['text'], 'Changed')
+        self.assertEqual(body['message']['format'], 'html')
+        self.assertEqual(body['message']['attachments'][0]['payload']['buttons'][0][0], {'type':'callback','text':'Next','payload':'survey:next'})
+        self.assertNotIn('notification', body)
 
     def test_updates_uses_marker_and_normalizes_callback_user(self):
         response = {'marker': 99, 'updates': [{'update_type': 'message_callback', 'timestamp': 1, 'chat_id': 20, 'callback': {'callback_id': 'cb', 'payload': 'survey:back', 'user': {'user_id': 7, 'name': 'Ivan'}}, 'message': {'body': {'mid': 'mid'}}}]}

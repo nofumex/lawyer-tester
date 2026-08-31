@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -54,6 +55,19 @@ class MaxLinkButtonsTests(unittest.TestCase):
 
 
 class PollingLifecycleTests(unittest.TestCase):
+    class RecordingMaxTransport(MaxTransport):
+        def __init__(self, update: dict, stop: threading.Event) -> None:
+            super().__init__('token','https://max.example',marker='next-marker')
+            self.update=update
+            self.stop=stop
+            self.calls:list[tuple[str,dict|None,str|None]]=[]
+        def updates(self, offset, timeout):
+            self.stop.set()
+            return [self.update]
+        def _call(self,path,body=None,method=None):
+            self.calls.append((path,body,method))
+            return {'success':True}
+
     def test_max_polling_starts_from_sqlite_marker_and_honours_stop_event(self) -> None:
         file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); file.close()
         store=Storage(file.name); store.set_poll_cursor('max','saved-marker')
@@ -92,7 +106,7 @@ class PollingLifecycleTests(unittest.TestCase):
                 if self.polls == 2:
                     stop.set()
                 return [update]
-            def answer_callback(self, callback_id, text=''):
+            def answer_callback(self, callback_id, text='', *, inline=None):
                 self.acks+=1
                 raise HTTPError('https://max.example/answers?callback_id=bad-callback',400,'bad request',{},None)
             def edit(self, user_id, message_id, text, inline): pass
@@ -104,6 +118,61 @@ class PollingLifecycleTests(unittest.TestCase):
         self.assertTrue(store.update_processed('max','max-callback-once'))
         self.assertEqual(transport.acks,1)
         self.assertEqual(transport.sends,1)
+        engine.shutdown(); store.close()
+
+    def test_max_inline_callback_is_answered_with_new_message_body(self) -> None:
+        file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); file.close()
+        store=Storage(file.name); seed_default_test(store)
+        engine=SurveyEngine(store,None,'pipeline','status')
+        test=store.enabled_test()['id']; question=store.test_questions(test)[2]
+        attempt=store.start_attempt('max','42',test)
+        with store.db:
+            store.db.execute("UPDATE attempts SET status='completed',current_question_id=NULL WHERE id=?",(attempt['id'],))
+            store.db.execute('INSERT INTO answers(attempt_id,question_id,value_json,answered_at) VALUES(?,?,?,?)',(attempt['id'],question['id'],json.dumps('answer'),1))
+        update={
+            '_event_id':'max-review-view',
+            'callback_query':{
+                'id':'cb-review',
+                'from':{'id':'42','first_name':'Max'},
+                'data':f'review:view:{attempt["id"]}:{question["id"]}',
+                'message':{'message_id':'mid-review','chat':{'id':'42'}},
+            },
+        }
+        stop=threading.Event(); transport=self.RecordingMaxTransport(update,stop)
+        run_transport(transport,engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset()),threading.RLock(),False,stop)
+        answer=next(call for call in transport.calls if call[0].startswith('/answers?'))
+        self.assertIn('message',answer[1])
+        self.assertIn('attachments',answer[1]['message'])
+        self.assertEqual(answer[1]['message']['attachments'][0]['type'],'inline_keyboard')
+        self.assertFalse(any(path.startswith('/messages?message_id=') and method == 'PUT' for path,_,method in transport.calls))
+        self.assertTrue(store.update_processed('max','max-review-view'))
+        engine.shutdown(); store.close()
+
+    def test_max_multi_choice_callback_sends_reply_keyboard_in_new_message(self) -> None:
+        file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); file.close()
+        store=Storage(file.name); seed_default_test(store)
+        engine=SurveyEngine(store,None,'pipeline','status')
+        test=store.enabled_test()['id']; question=store.test_questions(test)[9]; option=store.options(question['id'])[0]
+        attempt=store.start_attempt('max','42',test)
+        with store.db:
+            store.db.execute('UPDATE attempts SET current_question_id=? WHERE id=?',(question['id'],attempt['id']))
+        update={
+            '_event_id':'max-multi-choice',
+            'callback_query':{
+                'id':'cb-multi',
+                'from':{'id':'42','first_name':'Max'},
+                'data':f'survey:pick:{attempt["id"]}:{question["id"]}:{option["id"]}',
+                'message':{'message_id':'mid-multi','chat':{'id':'42'}},
+            },
+        }
+        stop=threading.Event(); transport=self.RecordingMaxTransport(update,stop)
+        run_transport(transport,engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset()),threading.RLock(),False,stop)
+        answer=next(call for call in transport.calls if call[0].startswith('/answers?'))
+        message=next(call for call in transport.calls if call[0].startswith('/messages?user_id='))
+        self.assertEqual(answer[1],{'message':None})
+        self.assertEqual(message[1]['attachments'][0]['payload']['buttons'][0][0]['type'],'message')
+        self.assertFalse(any(path.startswith('/messages?message_id=') and method == 'PUT' for path,_,method in transport.calls))
+        self.assertTrue(store.update_processed('max','max-multi-choice'))
         engine.shutdown(); store.close()
 
 
