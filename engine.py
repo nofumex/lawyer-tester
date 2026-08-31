@@ -15,6 +15,7 @@ LOG = logging.getLogger(__name__)
 
 class CRM(Protocol):
     def add_note(self, lead_id: int, text: str) -> None: ...
+    def has_note(self, lead_id: int, marker: str) -> bool: ...
     def find_lead(self, full_name: str, phone: str) -> int | None: ...
     def create_candidate_lead(self, full_name: str, phone: str) -> int: ...
     def target_stage(self, pipeline_name: str, status_name: str) -> tuple[int, int]: ...
@@ -204,13 +205,24 @@ class SurveyEngine:
                     self.store.fail_crm_operation(move_key); LOG.exception('Unable to move created lead after test')
     def resume_crm(self)->None:
         if not self.crm:return
-        for row in self.store.db.execute("SELECT id,user_platform,status FROM attempts WHERE amo_lead_id IS NULL AND full_name IS NOT NULL AND phone IS NOT NULL"):
+        # Besides lead linking, resume unfinished notes and final-stage moves.
+        # Operations left running by a killed process were made retryable by
+        # Storage startup recovery.
+        for row in self.store.db.execute("SELECT id,user_platform,status FROM attempts WHERE (amo_lead_id IS NULL AND full_name IS NOT NULL AND phone IS NOT NULL) OR amo_lead_id IS NOT NULL"):
             self._crm_executor.submit(self._sync_crm_after_answer,row['id'],row['user_platform'],[],None,row['status']=='completed')
+            self._crm_executor.submit(self._resume_actions,row['id'])
     def _crm_note(self, attempt:Any,text:str, flag:str) -> None:
         if not self.crm or not attempt['amo_lead_id'] or attempt[flag]: return
         operation_key=f'note:{flag}:{attempt["id"]}'
         if not self.store.claim_crm_operation(operation_key): return
-        try: self.crm.add_note(int(attempt['amo_lead_id']),text); self.store.mark(attempt['id'],flag)
+        marker=f'\u2063lawyer-tester:{operation_key}'
+        try:
+            # amoCRM does not expose an idempotency key for notes.  The invisible
+            # marker lets a restart reconcile an ambiguous request safely.
+            if getattr(self.crm,'has_note',lambda *_:False)(int(attempt['amo_lead_id']),marker):
+                self.store.mark(attempt['id'],flag)
+            else:
+                self.crm.add_note(int(attempt['amo_lead_id']),text+marker); self.store.mark(attempt['id'],flag)
         except Exception:
             self.store.fail_crm_operation(operation_key); LOG.exception('Unable to add amoCRM note for attempt %s',attempt['id'])
         else:self.store.finish_crm_operation(operation_key)
@@ -224,13 +236,20 @@ class SurveyEngine:
                 action=json.loads(option['action_json'])
                 if action.get('type')=='move_stage':
                     operation_key=f'action:move_stage:{attempt["id"]}:{option["id"]}'
-                    if not self.store.claim_action(attempt['id'],option['id'],'move_stage') or not self.store.claim_crm_operation(operation_key): continue
+                    if not self.store.claim_crm_operation(operation_key): continue
                     pipeline,status=self.crm.target_stage(action.get('pipeline',self.target_pipeline),action.get('status',self.target_status))
                     self.crm.move_lead(int(attempt['amo_lead_id']),pipeline,status)
                     self.store.finish_crm_operation(operation_key)
+                    self.store.claim_action(attempt['id'],option['id'],'move_stage')
             except Exception:
                 if operation_key is not None: self.store.fail_crm_operation(operation_key)
                 LOG.exception('Action failed for attempt %s',attempt['id'])
+    def _resume_actions(self,attempt_id:int) -> None:
+        """Rebuild option actions from saved answers after a restart."""
+        attempt=self.store._one('SELECT * FROM attempts WHERE id=?',(attempt_id,))
+        if not attempt or not attempt['amo_lead_id']: return
+        for answer in self.store.db.execute('SELECT question_id,value_json FROM answers WHERE attempt_id=?',(attempt_id,)):
+            self._run_actions(attempt,self.store.options(answer['question_id']),json.loads(answer['value_json']))
     def result_text(self,attempt:Any,completed:bool) -> str:
         lines=['Тестирование кандидата — '+('итоговый результат' if completed else 'промежуточный результат'),f"ФИО: {attempt['full_name'] or 'не указано'}",f"Телефон: {attempt['phone'] or 'не указан'}",'']
         for answer in self.store.answers_with_questions(attempt['id']):

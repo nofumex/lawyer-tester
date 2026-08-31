@@ -72,6 +72,9 @@ class Storage:
         if 'review_confirmed' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
             self.db.execute('ALTER TABLE attempts ADD COLUMN review_confirmed INTEGER NOT NULL DEFAULT 0')
         self.db.execute('UPDATE attempts SET amo_link_in_progress=0 WHERE amo_link_in_progress=1 AND amo_lead_id IS NULL')
+        # A process cannot leave a live CRM request behind after a restart.  Make
+        # such claims eligible for the engine's normal retry path.
+        self.db.execute("UPDATE crm_operations SET state='failed',updated_at=? WHERE state='running'",(int(time.time()),))
         self.db.commit()
         self.db = _LockedConnection(self.db)
 

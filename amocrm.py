@@ -53,6 +53,11 @@ class AmoClient:
     def add_note(self, lead_id: int, text: str) -> None:
         self.request("POST", f"/api/v4/leads/{lead_id}/notes", body=[{"note_type":"common", "params":{"text":text}}])
 
+    def has_note(self, lead_id: int, marker: str) -> bool:
+        """Find our invisible operation marker before replaying an interrupted note."""
+        data=self.request("GET", f"/api/v4/leads/{lead_id}/notes",params={"limit":250}) or {}
+        return any(marker in str(note.get("params",{}).get("text", "")) for note in data.get("_embedded",{}).get("notes",[]))
+
     def move_lead(self, lead_id: int, pipeline_id: int, status_id: int) -> None:
         self.request("PATCH", f"/api/v4/leads/{lead_id}", body={"pipeline_id":pipeline_id, "status_id":status_id})
 
