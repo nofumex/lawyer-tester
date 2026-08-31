@@ -11,7 +11,8 @@ class Admin:
  def __init__(self,s:Storage,amo_base_url:str=''): self.s=s;self.amo_base_url=amo_base_url.rstrip('/')
  def menu(self): return 'Админка',HOME
  def _lead_page(self,kind:str,page:int,total:int,rows:list)->tuple[str,list]:
-  title='Созданные сделки' if kind=='created' else 'Переведённые найденные сделки'
+  titles={'created':'Созданные сделки','moved':'Переведённые найденные сделки','unfinished':'Незавершённые со сделкой'}
+  title=titles.get(kind,'Сделки')
   keys=[]
   for r in rows:
    button={'text':f"#{r['amo_lead_id']} {r['full_name'] or 'Без ФИО'}"}
@@ -64,7 +65,7 @@ class Admin:
   if data.startswith('a:delq:') or data.startswith('a:delo:'):
    table='questions' if ':delq:' in data else 'options';self.s.db.execute(f'DELETE FROM {table} WHERE id=?',(data.split(':')[2],));self.s.db.commit();return self.menu()
   if data=='a:stats':
-   x=self.s.detailed_stats(); plats=' | '.join(f"{k}: {v}" for k,v in x['platforms'].items()); return f"Пользователи: {x['users']} ({plats})\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nЗавершение: {x['completion_pct']}% | Среднее: {x['avg_seconds']} сек.\nПереведено: {x['moved']}\nФИО не найдено, создана сделка: {x['created_leads']}\nНайдена и переведена сделка: {x['moved_found_leads']}\nРассылок: {sum(r['campaigns'] for r in x['broadcasts'])}",[[b(f"Созданные сделки ({x['created_leads']})",'a:created:0')],[b(f"Переведённые найденные ({x['moved_found_leads']})",'a:moved:0')],[b('‹ Назад','a:home')]]
+   x=self.s.detailed_stats(); plats=' | '.join(f"{k}: {v}" for k,v in x['platforms'].items()); return f"Пользователи: {x['users']} ({plats})\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nЗавершение: {x['completion_pct']}% | Среднее: {x['avg_seconds']} сек.\nПереведено: {x['moved']}\nФИО не найдено, создана сделка: {x['created_leads']}\nНайдена и переведена сделка: {x['moved_found_leads']}\nНезавершённых со сделкой: {x['unfinished_leads']}\nРассылок: {sum(r['campaigns'] for r in x['broadcasts'])}",[[b(f"Созданные сделки ({x['created_leads']})",'a:created:0')],[b(f"Переведённые найденные ({x['moved_found_leads']})",'a:moved:0')],[b(f"Незавершённые ({x['unfinished_leads']})",'a:unfinished:0')],[b('‹ Назад','a:home')]]
   if data.startswith('a:created'):
    page=int(data.split(':')[2]) if len(data.split(':'))>2 and data.split(':')[2].isdigit() else 0
    total=self.s.detailed_stats()['created_leads']; rows=self.s.created_leads(PAGE_SIZE,page*PAGE_SIZE)
@@ -73,6 +74,10 @@ class Admin:
    page=int(data.split(':')[2]) if len(data.split(':'))>2 and data.split(':')[2].isdigit() else 0
    total=self.s.detailed_stats()['moved_found_leads']; rows=self.s.moved_found_leads(PAGE_SIZE,page*PAGE_SIZE)
    return self._lead_page('moved',page,total,rows)
+  if data.startswith('a:unfinished'):
+   page=int(data.split(':')[2]) if len(data.split(':'))>2 and data.split(':')[2].isdigit() else 0
+   total=self.s.detailed_stats()['unfinished_leads']; rows=self.s.unfinished_leads(PAGE_SIZE,page*PAGE_SIZE)
+   return self._lead_page('unfinished',page,total,rows)
   if data=='a:cast': return 'Кому отправить?',[[b('Telegram','a:castto:telegram'),b('MAX','a:castto:max')],[b('Обе платформы','a:castto:both')],[b('История','a:casthistory'),b('‹ Назад','a:home')]]
   if data.startswith('a:castto:'):
    self.s.set_draft(platform,user,'cast_text',{'target':data.split(':')[2],'buttons':[]});return 'Отправьте текст рассылки. Форматирование Telegram сохраняется при отправке HTML/entities.',[[b('Отмена','a:home')]]
