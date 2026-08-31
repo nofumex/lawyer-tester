@@ -65,29 +65,54 @@ class MaxTransport:
     base_url:str
     platform:str='max'
     marker: int | None = None
-    def _call(self,path:str,body:dict[str,Any]|None=None) -> Any:
-        request=Request(self.base_url+path,data=json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers={'Authorization':f'Bearer {self.token}','Content-Type':'application/json'} if body is not None else {'Authorization':f'Bearer {self.token}'},method='POST' if body is not None else 'GET')
-        with urlopen(request,timeout=35) as response: return json.loads(response.read())
+    def _call(self,path:str,body:dict[str,Any]|None=None,method:str|None=None) -> Any:
+        # MAX expects the access token itself in Authorization, not an HTTP Bearer
+        # credential.  JSON is sent only for methods with a request body.
+        headers={'Authorization':self.token}
+        data=None if body is None else json.dumps(body,ensure_ascii=False).encode()
+        if data is not None: headers['Content-Type']='application/json'
+        request=Request(self.base_url+path,data=data,headers=headers,method=method or ('POST' if body is not None else 'GET'))
+        with urlopen(request,timeout=35) as response:
+            result=json.loads(response.read())
+        if isinstance(result,dict) and result.get('success') is False:
+            raise RuntimeError(result.get('message','MAX API request failed'))
+        return result
     def updates(self,offset:int,timeout:int) -> list[dict[str,Any]]:
-        params={'timeout':timeout,'limit':100,'types':['message_created','message_callback','bot_started']}
+        params={'timeout':timeout,'limit':100,'types':'message_created,message_callback,bot_started'}
         if self.marker is not None: params['marker']=self.marker
         data=self._call('/updates?'+urlencode(params,doseq=True)); self.marker=data.get('marker',self.marker)
         return [self.normalize_update(x) for x in data.get('updates',[])]
     def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:
-        # MAX supports inline keyboards; the payload is platform-native, unlike Telegram reply_markup.
-        body={'user_id':int(user_id),'text':text}
-        if inline: body['attachments']=[{'type':'inline_keyboard','payload':{'buttons':inline}}]
-        self._call('/messages',body)
+        body={'text':text,'format':'html'}
+        attachments=[]
+        if keyboard is not None:
+            # MAX has no Telegram-style reply keyboard.  A `message` button sends
+            # its label as a regular message, preserving engine.receive semantics.
+            attachments.append({'type':'inline_keyboard','payload':{'buttons':[
+                [{'type':'message','text':label} for label in row] for row in keyboard
+            ]}})
+        if inline:
+            attachments.append({'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}})
+        if attachments: body['attachments']=attachments
+        self._call('/messages?'+urlencode({'user_id':int(user_id)}),body)
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None:
-        body={'user_id':int(user_id),'text':payload.get('text','')}
+        body={'text':payload.get('text',''),'format':'html'}
         # MAX accepts uploaded media tokens in attachments; upload itself is deliberately
         # delegated to its official multipart /uploads flow by the deployment adapter.
         if payload.get('media_token'): body['attachments']=[{'type':payload.get('kind','file'),'payload':{'token':payload['media_token']}}]
-        if buttons: body.setdefault('attachments',[]).append({'type':'inline_keyboard','payload':{'buttons':buttons}})
-        self._call('/messages',body)
-    def answer_callback(self,callback_id:str,text:str='') -> None: self._call('/answers?'+urlencode({'callback_id':callback_id}),{'notification':text} if text else {})
-    def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None: self.send(user_id,text,inline=inline)
-    def delete(self,user_id:str,message_id:str)->None:return None
+        if buttons: body.setdefault('attachments',[]).append({'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(buttons)}})
+        self._call('/messages?'+urlencode({'user_id':int(user_id)}),body)
+    @staticmethod
+    def _inline_buttons(buttons:list[list[dict[str,str]]]) -> list[list[dict[str,str]]]:
+        return [[{'type':'callback','text':button['text'],'payload':button['callback_data']} for button in row] for row in buttons]
+    def answer_callback(self,callback_id:str,text:str='') -> None:
+        body={'notification':text} if text else {}
+        self._call('/answers?'+urlencode({'callback_id':callback_id}),body)
+    def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
+        body={'text':text,'format':'html','attachments':[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}]}
+        self._call('/messages?'+urlencode({'message_id':message_id}),body,method='PUT')
+    def delete(self,user_id:str,message_id:str)->None:
+        self._call('/messages?'+urlencode({'message_id':message_id}),method='DELETE')
     @staticmethod
     def normalize_update(update:dict[str,Any]) -> dict[str,Any]:
         typ=update.get('update_type'); user=update.get('user') or {}; uid=str(user.get('user_id') or user.get('id') or '')
@@ -96,5 +121,6 @@ class MaxTransport:
             msg=update.get('message') or {}; sender=msg.get('sender') or user
             return {'update_id':update.get('marker',update.get('timestamp',0)),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}
         if typ=='message_callback':
-            cb=update.get('callback') or {}; msg=update.get('message') or {}; return {'update_id':update.get('marker',update.get('timestamp',0)),'callback_query':{'id':cb.get('callback_id',''),'from':{'id':uid,'first_name':user.get('name','')},'data':cb.get('payload') or cb.get('data',''),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'chat':{'id':update.get('chat_id',uid)}}}}
+            cb=update.get('callback') or {}; msg=update.get('message') or {}; sender=cb.get('user') or user
+            return {'update_id':update.get('marker',update.get('timestamp',0)),'callback_query':{'id':cb.get('callback_id',''),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'data':cb.get('payload',''),'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'chat':{'id':msg.get('recipient',{}).get('chat_id',update.get('chat_id',uid))}}}}
         return {'update_id':update.get('marker',update.get('timestamp',0))}

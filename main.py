@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from html import escape
 
@@ -75,7 +76,7 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         transport.send(user_id,reply,remove_keyboard=True)
 
 
-def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config) -> None:
+def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config, processing_lock:threading.RLock, run_snapshots:bool=False) -> None:
     offset=0; last_snapshot=0
     while True:
         try:
@@ -87,14 +88,20 @@ def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:
         for update in updates:
             offset=max(offset,int(update.get('update_id',0))+1)
             try:
-                handle(transport,update,engine,admin,config)
-                incoming=update.get('message') or {}
-                if incoming.get('message_id'):
-                    try:transport.delete(str(incoming.get('chat',{}).get('id') or incoming.get('from',{}).get('id')),str(incoming['message_id']))
-                    except Exception:logging.debug('Cannot delete incoming message',exc_info=True)
+                # Storage and the CRM client are shared by both polling workers.  The
+                # lock makes each update an atomic unit for this process and avoids
+                # concurrent use of the single SQLite connection.
+                with processing_lock:
+                    handle(transport,update,engine,admin,config)
+                    incoming=update.get('message') or {}
+                    if incoming.get('message_id'):
+                        try:transport.delete(str(incoming.get('chat',{}).get('id') or incoming.get('from',{}).get('id')),str(incoming['message_id']))
+                        except Exception:logging.debug('Cannot delete incoming message',exc_info=True)
             except Exception: logging.exception('Update processing failed (%s)',transport.platform)
-        if time.time()-last_snapshot>60:
-            engine.send_snapshots(int(time.time())-config.inactivity_seconds); last_snapshot=time.time()
+        if run_snapshots and time.time()-last_snapshot>60:
+            with processing_lock:
+                engine.send_snapshots(int(time.time())-config.inactivity_seconds)
+            last_snapshot=time.time()
 
 
 def main() -> int:
@@ -107,9 +114,14 @@ def main() -> int:
     if config.telegram_token: transports.append(TelegramTransport(config.telegram_token))
     if config.max_token and config.max_api_base_url: transports.append(MaxTransport(config.max_token,config.max_api_base_url))
     if not transports: raise SystemExit('Configure TELEGRAM_BOT_TOKEN or MAX_BOT_TOKEN + MAX_API_BASE_URL')
-    if len(transports)>1:
-        logging.warning('Both transports are configured; starting Telegram. Run MAX in a separate process to use its long polling.')
-        transports = [next(x for x in transports if x.platform == 'telegram')]
-    run_transport(transports[0],engine,admin,config); return 0
+    processing_lock=threading.RLock()
+    workers=[threading.Thread(
+        target=run_transport,
+        args=(transport,engine,admin,config,processing_lock,index == 0),
+        name=f'{transport.platform}-polling',
+    ) for index,transport in enumerate(transports)]
+    for worker in workers: worker.start()
+    for worker in workers: worker.join()
+    return 0
 
 if __name__=='__main__': raise SystemExit(main())

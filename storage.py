@@ -2,9 +2,39 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
+
+
+class _LockedConnection:
+    """Serialize access to one sqlite connection shared by polling and CRM workers."""
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+        self._lock = threading.RLock()
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        with self._lock:
+            return self._connection.execute(*args, **kwargs)
+
+    def executescript(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        with self._lock:
+            return self._connection.executescript(*args, **kwargs)
+
+    def commit(self) -> None:
+        with self._lock:
+            self._connection.commit()
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._lock.acquire()
+        return self._connection.__enter__()
+
+    def __exit__(self, *args: Any) -> bool | None:
+        try:
+            return self._connection.__exit__(*args)
+        finally:
+            self._lock.release()
 
 
 class Storage:
@@ -37,6 +67,7 @@ class Storage:
         self.db.execute('UPDATE attempts SET amo_link_in_progress=0 WHERE amo_link_in_progress=1 AND amo_lead_id IS NULL')
         self.db.commit()
         self.db.commit()
+        self.db = _LockedConnection(self.db)
 
     def _one(self, sql: str, args: tuple = ()) -> sqlite3.Row | None: return self.db.execute(sql,args).fetchone()
     def touch_user(self, platform: str, user_id: str, name: str | None) -> None:
