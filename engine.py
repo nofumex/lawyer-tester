@@ -195,7 +195,7 @@ class SurveyEngine:
         if completed:
             fresh=self.store._one('SELECT * FROM attempts WHERE id=?',(attempt_id,))
             self._crm_note(fresh,self.result_text(fresh,True),'final_note_sent')
-            if fresh['amo_created']:
+            if fresh['amo_created'] and not self._has_selected_move_stage_action(attempt_id):
                 move_key=f'completion-move:{attempt_id}'
                 try:
                     if not self.store.claim_crm_operation(move_key): return
@@ -244,6 +244,14 @@ class SurveyEngine:
             except Exception:
                 if operation_key is not None: self.store.fail_crm_operation(operation_key)
                 LOG.exception('Action failed for attempt %s',attempt['id'])
+    def _has_selected_move_stage_action(self,attempt_id:int) -> bool:
+        for answer in self.store.db.execute('SELECT question_id,value_json FROM answers WHERE attempt_id=?',(attempt_id,)):
+            value=json.loads(answer['value_json'])
+            selected=set(value if isinstance(value,list) else [value])
+            for option in self.store.options(answer['question_id']):
+                if option['text'] not in selected or not option['action_json']: continue
+                if json.loads(option['action_json']).get('type')=='move_stage': return True
+        return False
     def _resume_actions(self,attempt_id:int) -> None:
         """Rebuild option actions from saved answers after a restart."""
         attempt=self.store._one('SELECT * FROM attempts WHERE id=?',(attempt_id,))

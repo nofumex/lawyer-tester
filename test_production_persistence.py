@@ -186,6 +186,64 @@ class _FlakyCRM:
             raise RuntimeError('temporary amoCRM failure')
 
 
+class _StageCRM:
+    def __init__(self) -> None:
+        self.moves:list[tuple[int,str,str]]=[]
+        self.notes:list[tuple[int,str]]=[]
+    def target_stage(self, pipeline, status): return (pipeline,status)
+    def move_lead(self, lead, pipeline, status): self.moves.append((lead,pipeline,status))
+    def add_note(self, lead, text): self.notes.append((lead,text))
+    def has_note(self, lead, marker): return False
+
+
+class CRMCompletionMoveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); self.file.close()
+        self.store=Storage(self.file.name); seed_default_test(self.store)
+        self.crm=_StageCRM(); self.engine=SurveyEngine(self.store,self.crm,'pipeline','status')
+        self.positive=self.store.db.execute('SELECT o.*,q.position AS question_position FROM options o JOIN questions q ON q.id=o.question_id WHERE o.action_json IS NOT NULL LIMIT 1').fetchone()
+        assert self.positive is not None
+        self.assertEqual(self.positive['question_position'],20)
+        with self.store.db:
+            self.store.db.execute('UPDATE options SET action_json=? WHERE id=?',(json.dumps({'type':'move_stage','pipeline':'HH-юристы','status':'готов к сотрудничеству'},ensure_ascii=False),self.positive['id']))
+        self.positive=self.store.db.execute('SELECT o.*,q.position AS question_position FROM options o JOIN questions q ON q.id=o.question_id WHERE o.id=?',(self.positive['id'],)).fetchone()
+        self.negative=self.store.db.execute('SELECT * FROM options WHERE question_id=? AND id<>? LIMIT 1',(self.positive['question_id'],self.positive['id'])).fetchone()
+        assert self.negative is not None
+
+    def tearDown(self) -> None:
+        self.engine.shutdown(); self.store.close()
+
+    def _completed_attempt_with_special_answer(self, answer_text: str):
+        attempt=self.store.start_attempt('telegram',f'user-{len(self.crm.moves)}',self.store.enabled_test()['id'])
+        self.store.set_identity(attempt['id'],lead_id=42,amo_created=True)
+        with self.store.db:
+            self.store.db.execute("UPDATE attempts SET status='completed',current_question_id=NULL WHERE id=?",(attempt['id'],))
+            self.store.db.execute('INSERT INTO answers(attempt_id,question_id,value_json,answered_at) VALUES(?,?,?,?)',(attempt['id'],self.positive['question_id'],json.dumps(answer_text,ensure_ascii=False),1))
+        return self.store._one('SELECT * FROM attempts WHERE id=?',(attempt['id'],))
+
+    def test_positive_special_answer_keeps_ready_to_cooperate_stage(self) -> None:
+        attempt=self._completed_attempt_with_special_answer(self.positive['text'])
+        self.engine._run_actions(attempt,[self.positive],self.positive['text'])
+        self.engine._sync_crm_after_answer(attempt['id'],'telegram',[],None,True)
+        self.assertEqual(self.crm.moves,[(42,'HH-юристы','готов к сотрудничеству')])
+        self.assertTrue(self.engine._has_selected_move_stage_action(attempt['id']))
+
+    def test_other_special_answer_gets_default_completed_stage(self) -> None:
+        attempt=self._completed_attempt_with_special_answer(self.negative['text'])
+        self.engine._sync_crm_after_answer(attempt['id'],'telegram',[],None,True)
+        self.assertEqual(self.crm.moves,[(42,'HH-юристы','Прошел тест (собес)')])
+
+    def test_restart_does_not_change_positive_special_stage(self) -> None:
+        attempt=self._completed_attempt_with_special_answer(self.positive['text'])
+        self.engine._run_actions(attempt,[self.positive],self.positive['text'])
+        self.engine._sync_crm_after_answer(attempt['id'],'telegram',[],None,True)
+        self.engine.shutdown(); self.store.close()
+        self.store=Storage(self.file.name)
+        self.engine=SurveyEngine(self.store,self.crm,'pipeline','status')
+        self.engine.resume_crm(); self.engine.shutdown()
+        self.assertEqual(self.crm.moves,[(42,'HH-юристы','готов к сотрудничеству')])
+
+
 class CRMActionRetryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); self.file.close()
