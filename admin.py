@@ -5,10 +5,26 @@ from storage import Storage
 
 def b(text:str,data:str)->dict[str,str]: return {'text':text,'callback_data':data}
 HOME=[[b('Тесты','a:tests'),b('Статистика','a:stats')],[b('Рассылка','a:cast')]]
+PAGE_SIZE=10
 
 class Admin:
  def __init__(self,s:Storage,amo_base_url:str=''): self.s=s;self.amo_base_url=amo_base_url.rstrip('/')
  def menu(self): return 'Админка',HOME
+ def _lead_page(self,kind:str,page:int,total:int,rows:list)->tuple[str,list]:
+  title='Созданные сделки' if kind=='created' else 'Переведённые найденные сделки'
+  keys=[]
+  for r in rows:
+   button={'text':f"#{r['amo_lead_id']} {r['full_name'] or 'Без ФИО'}"}
+   if self.amo_base_url:button['url']=f"{self.amo_base_url}/leads/detail/{r['amo_lead_id']}"
+   else:button['callback_data']=f'a:{kind}:{page}'
+   keys.append([button])
+  nav=[]
+  if page>0:nav.append(b('← Назад',f'a:{kind}:{page-1}'))
+  if (page+1)*PAGE_SIZE<total:nav.append(b('Вперёд →',f'a:{kind}:{page+1}'))
+  if nav:keys.append(nav)
+  keys.append([b('‹ К статистике','a:stats')])
+  pages=max(1,(total+PAGE_SIZE-1)//PAGE_SIZE)
+  return f'{title}: {total}\nСтраница {page+1} из {pages}',keys
  def callback(self,platform:str,user:str,data:str)->tuple[str,list]|None:
   if data=='a:home':return self.menu()
   if data=='a:tests':
@@ -48,15 +64,15 @@ class Admin:
   if data.startswith('a:delq:') or data.startswith('a:delo:'):
    table='questions' if ':delq:' in data else 'options';self.s.db.execute(f'DELETE FROM {table} WHERE id=?',(data.split(':')[2],));self.s.db.commit();return self.menu()
   if data=='a:stats':
-   x=self.s.detailed_stats(); plats=' | '.join(f"{k}: {v}" for k,v in x['platforms'].items()); return f"Пользователи: {x['users']} ({plats})\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nЗавершение: {x['completion_pct']}% | Среднее: {x['avg_seconds']} сек.\nПереведено: {x['moved']}\nФИО не найдено, создана сделка: {x['created_leads']}\nРассылок: {sum(r['campaigns'] for r in x['broadcasts'])}",[[b(f"Созданные сделки ({x['created_leads']})",'a:created')],[b('‹ Назад','a:home')]]
-  if data=='a:created':
-   rows=self.s.created_leads();keys=[]
-   for r in rows:
-    button={'text':f"#{r['amo_lead_id']} {r['full_name'] or 'Без ФИО'}"}
-    if self.amo_base_url:button['url']=f"{self.amo_base_url}/leads/detail/{r['amo_lead_id']}"
-    else:button['callback_data']='a:created'
-    keys.append([button])
-   keys.append([b('‹ К статистике','a:stats')]);return 'Сделки, созданные при отсутствии совпадения:',keys
+   x=self.s.detailed_stats(); plats=' | '.join(f"{k}: {v}" for k,v in x['platforms'].items()); return f"Пользователи: {x['users']} ({plats})\nНачали: {x['started']} | Завершили: {x['completed']} | Активны: {x['active']} | Неактивны: {x['abandoned']}\nСегодня/7д/30д: {x['day']}/{x['week']}/{x['month']}\nЗавершение: {x['completion_pct']}% | Среднее: {x['avg_seconds']} сек.\nПереведено: {x['moved']}\nФИО не найдено, создана сделка: {x['created_leads']}\nНайдена и переведена сделка: {x['moved_found_leads']}\nРассылок: {sum(r['campaigns'] for r in x['broadcasts'])}",[[b(f"Созданные сделки ({x['created_leads']})",'a:created:0')],[b(f"Переведённые найденные ({x['moved_found_leads']})",'a:moved:0')],[b('‹ Назад','a:home')]]
+  if data.startswith('a:created'):
+   page=int(data.split(':')[2]) if len(data.split(':'))>2 and data.split(':')[2].isdigit() else 0
+   total=self.s.detailed_stats()['created_leads']; rows=self.s.created_leads(PAGE_SIZE,page*PAGE_SIZE)
+   return self._lead_page('created',page,total,rows)
+  if data.startswith('a:moved'):
+   page=int(data.split(':')[2]) if len(data.split(':'))>2 and data.split(':')[2].isdigit() else 0
+   total=self.s.detailed_stats()['moved_found_leads']; rows=self.s.moved_found_leads(PAGE_SIZE,page*PAGE_SIZE)
+   return self._lead_page('moved',page,total,rows)
   if data=='a:cast': return 'Кому отправить?',[[b('Telegram','a:castto:telegram'),b('MAX','a:castto:max')],[b('Обе платформы','a:castto:both')],[b('История','a:casthistory'),b('‹ Назад','a:home')]]
   if data.startswith('a:castto:'):
    self.s.set_draft(platform,user,'cast_text',{'target':data.split(':')[2],'buttons':[]});return 'Отправьте текст рассылки. Форматирование Telegram сохраняется при отправке HTML/entities.',[[b('Отмена','a:home')]]

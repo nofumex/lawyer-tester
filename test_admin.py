@@ -1,5 +1,5 @@
 from __future__ import annotations
-import tempfile, unittest
+import tempfile, time, unittest
 from admin import Admin
 from storage import Storage
 
@@ -11,5 +11,49 @@ class AdminDraftTests(unittest.TestCase):
         text,buttons=admin.text('telegram','1','Текст рассылки')
         self.assertIn('Предпросмотр',text)
         self.assertEqual(buttons[0][0]['callback_data'],'a:castsend')
+
+class AdminLeadListTests(unittest.TestCase):
+    def setUp(self):
+        self.file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False);self.file.close()
+        self.store=Storage(self.file.name);self.admin=Admin(self.store,'https://amo.example')
+        now=int(time.time())
+        with self.store.db:
+            test_id=self.store.db.execute('INSERT INTO tests(name,enabled,created_at) VALUES(?,?,?)',('T',1,now)).lastrowid
+            qid=self.store.db.execute('INSERT INTO questions(test_id,position,text,kind) VALUES(?,?,?,?)',(test_id,1,'Q','single_choice')).lastrowid
+            self.option_id=self.store.db.execute('INSERT INTO options(question_id,position,text) VALUES(?,?,?)',(qid,1,'Yes')).lastrowid
+    def tearDown(self):
+        self.store.close()
+    def _attempt(self, lead_id:int, *, created:bool, moved:bool):
+        now=int(time.time())
+        with self.store.db:
+            attempt_id=self.store.db.execute("INSERT INTO attempts(user_platform,user_id,test_id,started_at,last_activity_at,current_question_id,status,amo_lead_id,full_name,phone,amo_created) VALUES(?,?,?,?,?,NULL,'completed',?,?,?,?)",('telegram',str(lead_id),1,now,now,lead_id,f'User {lead_id}','79990000000',int(created))).lastrowid
+            if moved:self.store.db.execute('INSERT INTO action_executions VALUES(?,?,?,?)',(attempt_id,self.option_id,'move_stage',now))
+        return attempt_id
+    def test_stats_has_created_and_moved_found_buttons(self):
+        self._attempt(100,created=True,moved=False)
+        self._attempt(200,created=False,moved=True)
+        text,buttons=self.admin.callback('telegram','admin','a:stats')
+        self.assertIn('Созданные сделки (1)',buttons[0][0]['text'])
+        self.assertEqual(buttons[0][0]['callback_data'],'a:created:0')
+        self.assertIn('Переведённые найденные (1)',buttons[1][0]['text'])
+        self.assertEqual(buttons[1][0]['callback_data'],'a:moved:0')
+        self.assertIn('Найдена и переведена сделка: 1',text)
+    def test_created_leads_are_paginated(self):
+        for lead_id in range(100,112):self._attempt(lead_id,created=True,moved=False)
+        text,buttons=self.admin.callback('telegram','admin','a:created:0')
+        lead_buttons=[row for row in buttons if row[0].get('url')]
+        self.assertEqual(len(lead_buttons),10)
+        self.assertEqual(buttons[-2][0]['callback_data'],'a:created:1')
+        self.assertIn('Страница 1 из 2',text)
+        self.assertTrue(lead_buttons[0][0]['url'].endswith('/leads/detail/111'))
+    def test_moved_found_leads_are_paginated_and_exclude_created(self):
+        for lead_id in range(200,211):self._attempt(lead_id,created=False,moved=True)
+        self._attempt(300,created=True,moved=True)
+        text,buttons=self.admin.callback('telegram','admin','a:moved:1')
+        lead_buttons=[row for row in buttons if row[0].get('url')]
+        self.assertEqual(len(lead_buttons),1)
+        self.assertEqual(lead_buttons[0][0]['text'],'#200 User 200')
+        self.assertEqual(buttons[-2][0]['callback_data'],'a:moved:0')
+        self.assertIn('Страница 2 из 2',text)
 
 if __name__=='__main__':unittest.main()
