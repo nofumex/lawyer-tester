@@ -134,8 +134,11 @@ class MaxTransport:
     def _inline_buttons(buttons:list[list[dict[str,str]]]) -> list[list[dict[str,str]]]:
         return [[({'type':'link','text':button['text'],'url':button['url']} if button.get('url') else {'type':'callback','text':button['text'],'payload':button['callback_data']}) for button in row] for row in buttons]
     def answer_callback(self,callback_id:str,text:str='') -> None:
-        body={'notification':text} if text else {}
-        self._call('/answers?'+urlencode({'callback_id':callback_id}),body)
+        path='/answers?'+urlencode({'callback_id':callback_id})
+        if text:
+            self._call(path,{'notification':text})
+        else:
+            self._call(path,method='POST')
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
         body={'text':text,'format':'html','attachments':[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}]}
         self._call('/messages?'+urlencode({'message_id':message_id}),body,method='PUT')

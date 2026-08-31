@@ -44,6 +44,14 @@ class MaxTransportTests(unittest.TestCase):
         self.assertEqual((callback.get_method(), callback.full_url), ('POST', 'https://max.example/answers?callback_id=cb-1'))
         self.assertEqual(json.loads(callback.data), {'notification': 'Done'})
 
+    def test_empty_callback_ack_sends_post_without_json_body(self):
+        with patch('transports.urlopen', self.request):
+            self.transport.answer_callback('cb-empty')
+        request = self.requests[0]
+        self.assertEqual((request.get_method(), request.full_url), ('POST', 'https://max.example/answers?callback_id=cb-empty'))
+        self.assertIsNone(request.data)
+        self.assertIsNone(request.get_header('Content-type'))
+
     def test_updates_uses_marker_and_normalizes_callback_user(self):
         response = {'marker': 99, 'updates': [{'update_type': 'message_callback', 'timestamp': 1, 'chat_id': 20, 'callback': {'callback_id': 'cb', 'payload': 'survey:back', 'user': {'user_id': 7, 'name': 'Ivan'}}, 'message': {'body': {'mid': 'mid'}}}]}
         def request(request, timeout):
