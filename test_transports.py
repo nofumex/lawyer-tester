@@ -60,6 +60,13 @@ class MaxTransportTests(unittest.TestCase):
         self.assertIn('status=400', logs.output[0])
         self.assertIn('bad callback', logs.output[0])
 
+    def test_edit_400_logs_response_and_is_best_effort(self):
+        error = HTTPError('https://max.example/messages?message_id=bad', 400, 'bad request', {}, io.BytesIO(b'{"success":false,"message":"bad edit"}'))
+        with patch('transports.urlopen', side_effect=error), self.assertLogs('transports', level='WARNING') as logs:
+            self.transport.edit('42', 'bad', 'Changed', [[{'text': 'Back', 'callback_data': 'survey:back'}]])
+        self.assertIn('status=400', logs.output[0])
+        self.assertIn('bad edit', logs.output[0])
+
     def test_updates_uses_marker_and_normalizes_callback_user(self):
         response = {'marker': 99, 'updates': [{'update_type': 'message_callback', 'timestamp': 1, 'chat_id': 20, 'callback': {'callback_id': 'cb', 'payload': 'survey:back', 'user': {'user_id': 7, 'name': 'Ivan'}}, 'message': {'body': {'mid': 'mid'}}}]}
         def request(request, timeout):

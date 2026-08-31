@@ -150,7 +150,13 @@ class MaxTransport:
             LOG.warning('MAX callback answer failed: status=%s body=%s',exc.code,body)
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
         body={'text':text,'format':'html','attachments':[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}]}
-        self._call('/messages?'+urlencode({'message_id':message_id}),body,method='PUT')
+        try:
+            self._call('/messages?'+urlencode({'message_id':message_id}),body,method='PUT')
+        except HTTPError as exc:
+            if exc.code != 400:
+                raise
+            response_body=exc.read().decode('utf-8','replace') if exc.fp else ''
+            LOG.warning('MAX message edit failed: status=%s body=%s',exc.code,response_body)
     def delete(self,user_id:str,message_id:str)->None:
         self._call('/messages?'+urlencode({'message_id':message_id}),method='DELETE')
     @staticmethod
