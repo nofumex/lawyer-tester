@@ -169,7 +169,7 @@ class PollingLifecycleTests(unittest.TestCase):
         run_transport(transport,engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset()),threading.RLock(),False,stop)
         answer=next(call for call in transport.calls if call[0].startswith('/answers?'))
         message=next(call for call in transport.calls if call[0].startswith('/messages?user_id='))
-        self.assertEqual(answer[1],{'message':None})
+        self.assertEqual(answer[1],{'notification':'OK'})
         self.assertEqual(message[1]['attachments'][0]['payload']['buttons'][0][0]['type'],'message')
         self.assertFalse(any(path.startswith('/messages?message_id=') and method == 'PUT' for path,_,method in transport.calls))
         self.assertTrue(store.update_processed('max','max-multi-choice'))

@@ -43,14 +43,14 @@ class MaxTransportTests(unittest.TestCase):
         self.assertEqual((edit.get_method(), edit.full_url), ('PUT', 'https://max.example/messages?message_id=mid-1'))
         self.assertEqual((delete.get_method(), delete.full_url), ('DELETE', 'https://max.example/messages?message_id=mid-1'))
         self.assertEqual((callback.get_method(), callback.full_url), ('POST', 'https://max.example/answers?callback_id=cb-1'))
-        self.assertEqual(json.loads(callback.data), {'message': {'text': 'Done', 'format': 'html'}})
+        self.assertEqual(json.loads(callback.data), {'notification': 'Done'})
 
-    def test_empty_callback_ack_sends_nullable_message_body(self):
+    def test_empty_callback_ack_sends_neutral_notification(self):
         with patch('transports.urlopen', self.request):
             self.transport.answer_callback('cb-empty')
         request = self.requests[0]
         self.assertEqual((request.get_method(), request.full_url), ('POST', 'https://max.example/answers?callback_id=cb-empty'))
-        self.assertEqual(json.loads(request.data), {'message': None})
+        self.assertEqual(json.loads(request.data), {'notification': 'OK'})
         self.assertEqual(request.get_header('Content-type'), 'application/json')
 
     def test_callback_ack_400_logs_response_and_is_best_effort(self):

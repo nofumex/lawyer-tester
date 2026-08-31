@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 LOG = logging.getLogger(__name__)
+MAX_CALLBACK_ACK_TEXT = 'OK'
 
 
 def _open_with_retry(request: Request, timeout: int = 35) -> Any:
@@ -144,8 +145,11 @@ class MaxTransport:
     def answer_callback(self,callback_id:str,text:str='',*,inline:list[list[dict[str,str]]]|None=None) -> None:
         path='/answers?'+urlencode({'callback_id':callback_id})
         try:
-            message=self._message_body(text,inline) if text or inline is not None else None
-            self._call(path,{'message':message})
+            if inline is not None:
+                body={'message':self._message_body(text,inline)}
+            else:
+                body={'notification':(text or MAX_CALLBACK_ACK_TEXT)[:200]}
+            self._call(path,body)
         except HTTPError as exc:
             if exc.code != 400:
                 raise
