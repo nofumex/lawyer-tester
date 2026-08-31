@@ -103,8 +103,10 @@ class Admin:
   d=self.s.draft(platform,user)
   if not d or d[0]!='cast_confirm': return 'Черновик рассылки не найден.'
   _,p=d;bid=self.s.create_broadcast(platform,user,p['target'],{'kind':'text','text':p['text']},p['buttons']);ok=bad=0
+  transports=transport if isinstance(transport,dict) else {getattr(transport,'platform',''):transport}
   for row in self.s.users(None if p['target']=='both' else p['target']):
-   if row['platform']!=transport.platform: continue
-   try: transport.send_broadcast(row['user_id'],{'kind':'text','text':p['text']},p['buttons']);ok+=1
+   target=transports.get(row['platform'])
+   if not target: continue
+   try: target.send_broadcast(row['user_id'],{'kind':'text','text':p['text']},p['buttons']);ok+=1
    except Exception: bad+=1
   self.s.complete_broadcast(bid,ok,bad);self.s.clear_draft(platform,user);return f'Рассылка завершена: успешно {ok}, ошибок {bad}.'

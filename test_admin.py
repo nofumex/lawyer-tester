@@ -72,4 +72,23 @@ class AdminLeadListTests(unittest.TestCase):
         self.assertEqual(buttons[-2][0]['callback_data'],'a:unfinished:0')
         self.assertIn('Страница 2 из 2',text)
 
+class AdminBroadcastTests(unittest.TestCase):
+    def test_deliver_both_uses_each_platform_transport(self):
+        file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False);file.close()
+        store=Storage(file.name);admin=Admin(store)
+        now=int(time.time())
+        with store.db:
+            store.db.execute('INSERT INTO users VALUES(?,?,?,?,?)',('telegram','tg','Tg',now,now))
+            store.db.execute('INSERT INTO users VALUES(?,?,?,?,?)',('max','mx','Max',now,now))
+        store.set_draft('telegram','admin','cast_confirm',{'target':'both','text':'Hello','buttons':[]})
+        class Transport:
+            def __init__(self, platform): self.platform=platform; self.sent=[]
+            def send_broadcast(self, user_id, payload, buttons): self.sent.append(user_id)
+        tg=Transport('telegram'); mx=Transport('max')
+        result=admin.deliver('telegram','admin',{'telegram':tg,'max':mx})
+        self.assertEqual(tg.sent,['tg'])
+        self.assertEqual(mx.sent,['mx'])
+        self.assertIn('успешно 2',result)
+        store.close()
+
 if __name__=='__main__':unittest.main()

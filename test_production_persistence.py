@@ -81,6 +81,33 @@ class PollingLifecycleTests(unittest.TestCase):
         self.assertEqual(received,['saved-marker'])
         store.close()
 
+    def test_admin_broadcast_does_not_block_update_completion(self) -> None:
+        file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); file.close()
+        store=Storage(file.name)
+        start=threading.Event(); release=threading.Event()
+        class Admin:
+            def __init__(self): self.calls=0
+            def deliver(self, platform, user, transports):
+                self.calls+=1; start.set(); release.wait(5); return 'done'
+        class Transport:
+            platform='telegram'
+            def __init__(self): self.marker=None; self.sent=[]
+            def updates(self, offset, timeout):
+                return [{'_event_id':'castsend-1','update_id':1,'callback_query':{'id':'cb','from':{'id':'admin'},'data':'a:castsend','message':{'chat':{'id':'admin'}}}}]
+            def send(self, user_id, text, **kwargs): self.sent.append((user_id,text))
+        stop=threading.Event()
+        class Engine: pass
+        engine=Engine(); engine.store=store
+        transport=Transport(); admin=Admin()
+        def stop_when_started():
+            start.wait(5); stop.set()
+        waiter=threading.Thread(target=stop_when_started); waiter.start()
+        run_transport(transport,engine,admin,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset({'admin'})),threading.RLock(),False,stop,{'telegram':transport})
+        self.assertTrue(store.update_processed('telegram','castsend-1'))
+        self.assertEqual(admin.calls,1)
+        release.set(); waiter.join()
+        store.close()
+
     def test_max_callback_ack_400_does_not_block_processed_update(self) -> None:
         file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); file.close()
         store=Storage(file.name); seed_default_test(store)

@@ -15,6 +15,18 @@ from storage import Storage
 from transports import MaxTransport, TelegramTransport, Transport
 
 
+def _finish_broadcast(admin:Admin, source_platform:str, user_id:str, transports:dict[str,Transport], reply_transport:Transport) -> None:
+    try:
+        result=admin.deliver(source_platform,user_id,transports)
+    except Exception:
+        logging.exception('Broadcast failed')
+        result='Рассылка завершилась с ошибкой. Подробности записаны в лог.'
+    try:
+        reply_transport.send(user_id,result)
+    except Exception:
+        logging.exception('Cannot send broadcast completion message')
+
+
 def answer_callback_best_effort(transport:Transport, callback_id:str, text:str='', *, inline:list[list[dict[str,str]]]|None=None) -> None:
     try:
         transport.answer_callback(callback_id,text,inline=inline)
@@ -22,7 +34,7 @@ def answer_callback_best_effort(transport:Transport, callback_id:str, text:str='
         logging.warning('Callback acknowledgement failed (%s); continuing update processing',transport.platform,exc_info=True)
 
 
-def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, config:Config) -> None:
+def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, config:Config, transports:dict[str,Transport]|None=None) -> None:
     message=update.get('message') or update.get('callback_query',{}).get('message') or {}
     sender=(update.get('message') or update.get('callback_query',{}).get('from') or {}).get('from') or update.get('callback_query',{}).get('from') or {}
     user_id=str(sender.get('id') or message.get('chat',{}).get('id') or '')
@@ -55,7 +67,8 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     if callback and callback.startswith('a:'):
         if is_admin:
             if callback=='a:castsend':
-                transport.send(user_id,admin.deliver(transport.platform,user_id,transport)); return
+                threading.Thread(target=_finish_broadcast,args=(admin,transport.platform,user_id,transports or {transport.platform:transport},transport),name='broadcast-worker',daemon=True).start()
+                return
             reply,keyboard=admin.callback(transport.platform,user_id,callback); transport.send(user_id,reply,inline=keyboard)
         return
     if text.startswith('/test_search'):
@@ -91,7 +104,7 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         transport.send(user_id,reply,remove_keyboard=True)
 
 
-def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config, processing_lock:threading.RLock, run_snapshots:bool=False, stop_event:threading.Event|None=None) -> None:
+def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config, processing_lock:threading.RLock, run_snapshots:bool=False, stop_event:threading.Event|None=None, transports:dict[str,Transport]|None=None) -> None:
     stop_event=stop_event or threading.Event()
     stored_cursor=engine.store.poll_cursor(transport.platform)
     offset=int(stored_cursor) if transport.platform=='telegram' and stored_cursor is not None else stored_cursor
@@ -106,18 +119,16 @@ def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:
         batch_ok=True
         for update in updates:
             try:
-                # Storage and the CRM client are shared by both polling workers.  The
-                # lock makes each update an atomic unit for this process and avoids
-                # concurrent use of the single SQLite connection.
                 with processing_lock:
                     update_key=str(update.get('_event_id') or update.get('update_id') or '')
                     if not update_key or engine.store.update_processed(transport.platform,update_key):
                         continue
-                    handle(transport,update,engine,admin,config)
-                    incoming=update.get('message') or {}
-                    if incoming.get('message_id'):
-                        try:transport.delete(str(incoming.get('chat',{}).get('id') or incoming.get('from',{}).get('id')),str(incoming['message_id']))
-                        except Exception:logging.debug('Cannot delete incoming message',exc_info=True)
+                handle(transport,update,engine,admin,config,transports)
+                incoming=update.get('message') or {}
+                if incoming.get('message_id'):
+                    try:transport.delete(str(incoming.get('chat',{}).get('id') or incoming.get('from',{}).get('id')),str(incoming['message_id']))
+                    except Exception:logging.debug('Cannot delete incoming message',exc_info=True)
+                with processing_lock:
                     if transport.platform=='telegram':
                         offset=max(offset or 0,int(update['update_id'])+1)
                         engine.store.complete_update(transport.platform,update_key,offset)
@@ -148,13 +159,14 @@ def main() -> int:
     if config.max_token and config.max_api_base_url:
         transports.append(MaxTransport(config.max_token,config.max_api_base_url,marker=store.poll_cursor('max')))
     if not transports: raise SystemExit('Configure TELEGRAM_BOT_TOKEN or MAX_BOT_TOKEN + MAX_API_BASE_URL')
+    transports_by_platform={transport.platform:transport for transport in transports}
     processing_lock=threading.RLock(); stop_event=threading.Event()
     def request_stop(signum: int, frame: object) -> None:
         logging.info('Received signal %s; stopping polling',signum); stop_event.set()
     for sig in (signal.SIGINT, signal.SIGTERM): signal.signal(sig,request_stop)
     workers=[threading.Thread(
         target=run_transport,
-        args=(transport,engine,admin,config,processing_lock,index == 0,stop_event),
+        args=(transport,engine,admin,config,processing_lock,index == 0,stop_event,transports_by_platform),
         name=f'{transport.platform}-polling',
     ) for index,transport in enumerate(transports)]
     for worker in workers: worker.start()
