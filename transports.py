@@ -1,10 +1,34 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass,field
 from typing import Any, Protocol
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
+
+
+def _open_with_retry(request: Request, timeout: int = 35) -> Any:
+    """Retry transient Bot API failures with bounded exponential backoff."""
+    last_error: Exception | None=None
+    for attempt in range(5):
+        try:
+            return urlopen(request,timeout=timeout)
+        except HTTPError as exc:
+            if exc.code != 429 and not 500 <= exc.code < 600:
+                raise
+            last_error=exc
+            retry_after=exc.headers.get('Retry-After') if exc.headers else None
+            try: delay=float(retry_after) if retry_after else min(.5 * (2 ** attempt),8)
+            except ValueError: delay=min(.5 * (2 ** attempt),8)
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error=exc
+            delay=min(.5 * (2 ** attempt),8)
+        if attempt == 4: break
+        time.sleep(delay)
+    assert last_error is not None
+    raise last_error
 
 
 class Transport(Protocol):
@@ -24,7 +48,7 @@ class TelegramTransport:
     _last_message:dict[str,int]=field(default_factory=dict,init=False,repr=False)
     def _call(self, method:str, body:dict[str,Any]) -> Any:
         request=Request(f'https://api.telegram.org/bot{self.token}/{method}',data=json.dumps(body,ensure_ascii=False).encode(),headers={'Content-Type':'application/json'},method='POST')
-        with urlopen(request,timeout=35) as result:
+        with _open_with_retry(request) as result:
             data=json.loads(result.read())
         if not data.get('ok'): raise RuntimeError(str(data))
         return data['result']
@@ -75,14 +99,15 @@ class MaxTransport:
         data=None if body is None else json.dumps(body,ensure_ascii=False).encode()
         if data is not None: headers['Content-Type']='application/json'
         request=Request(self.base_url+path,data=data,headers=headers,method=method or ('POST' if body is not None else 'GET'))
-        with urlopen(request,timeout=35) as response:
+        with _open_with_retry(request) as response:
             result=json.loads(response.read())
         if isinstance(result,dict) and result.get('success') is False:
             raise RuntimeError(result.get('message','MAX API request failed'))
         return result
     def updates(self,offset:int | str | None,timeout:int) -> list[dict[str,Any]]:
         params={'timeout':timeout,'limit':100,'types':'message_created,message_callback,bot_started'}
-        if offset is not None: params['marker']=str(offset)
+        marker=offset if offset is not None else self.marker
+        if marker is not None: params['marker']=str(marker)
         data=self._call('/updates?'+urlencode(params,doseq=True)); self.marker=data.get('marker')
         return [self.normalize_update(x) for x in data.get('updates',[])]
     def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:

@@ -1,8 +1,9 @@
 import json
 import unittest
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
-from transports import MaxTransport
+from transports import MaxTransport, TelegramTransport
 
 
 class _Response:
@@ -54,3 +55,29 @@ class MaxTransportTests(unittest.TestCase):
         self.assertEqual(self.transport.marker, 99)
         self.assertEqual(updates[0]['callback_query']['from']['id'], '7')
         self.assertEqual(updates[0]['callback_query']['message']['message_id'], 'mid')
+
+    def test_restored_marker_is_used_when_no_explicit_cursor_is_passed(self):
+        response={'marker':101,'updates':[]}
+        requests=[]
+        def request(request, timeout):
+            requests.append(request)
+            return _Response(response)
+        with patch('transports.urlopen',request):
+            MaxTransport('test-token','https://max.example',marker='saved-marker').updates(None,25)
+        self.assertIn('marker=saved-marker',requests[0].full_url)
+
+
+class TransportRetryTests(unittest.TestCase):
+    def test_telegram_retries_rate_limit_and_network_failures(self):
+        failures=[HTTPError('https://telegram.example',429,'rate limited',{'Retry-After':'0'},None),URLError('temporary')]
+        response=_Response({'ok':True,'result':{'message_id':1}})
+        with patch('transports.urlopen',side_effect=failures+[response]) as opened, patch('transports.time.sleep') as sleep:
+            TelegramTransport('token').send('1','hello')
+        self.assertEqual(opened.call_count,3)
+        self.assertEqual(sleep.call_count,2)
+
+    def test_max_retries_server_error(self):
+        error=HTTPError('https://max.example',503,'unavailable',{},None)
+        with patch('transports.urlopen',side_effect=[error,_Response({'success':True})]) as opened, patch('transports.time.sleep'):
+            MaxTransport('token','https://max.example').send('1','hello')
+        self.assertEqual(opened.call_count,2)

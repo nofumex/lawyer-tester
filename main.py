@@ -80,7 +80,7 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
 def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:Config, processing_lock:threading.RLock, run_snapshots:bool=False, stop_event:threading.Event|None=None) -> None:
     stop_event=stop_event or threading.Event()
     stored_cursor=engine.store.poll_cursor(transport.platform)
-    offset=int(stored_cursor) if transport.platform=='telegram' and stored_cursor is not None else None
+    offset=int(stored_cursor) if transport.platform=='telegram' and stored_cursor is not None else stored_cursor
     last_snapshot=0
     while not stop_event.is_set():
         try:
@@ -131,7 +131,8 @@ def main() -> int:
     engine=SurveyEngine(store,crm,config.target_pipeline,config.target_status); engine.resume_crm(); admin=Admin(store,config.amo_base_url)
     transports:list[Transport]=[]
     if config.telegram_token: transports.append(TelegramTransport(config.telegram_token))
-    if config.max_token and config.max_api_base_url: transports.append(MaxTransport(config.max_token,config.max_api_base_url))
+    if config.max_token and config.max_api_base_url:
+        transports.append(MaxTransport(config.max_token,config.max_api_base_url,marker=store.poll_cursor('max')))
     if not transports: raise SystemExit('Configure TELEGRAM_BOT_TOKEN or MAX_BOT_TOKEN + MAX_API_BASE_URL')
     processing_lock=threading.RLock(); stop_event=threading.Event()
     def request_stop(signum: int, frame: object) -> None:

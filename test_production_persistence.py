@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
 
 from engine import SurveyEngine
+from main import run_transport
 from seed import seed_default_test
 from storage import Storage
 from transports import MaxTransport
@@ -47,6 +50,21 @@ class MaxLinkButtonsTests(unittest.TestCase):
         buttons=MaxTransport._inline_buttons([[{'text':'Site','url':'https://example.test'}, {'text':'Next','callback_data':'survey:next'}]])
         self.assertEqual(buttons[0][0],{'type':'link','text':'Site','url':'https://example.test'})
         self.assertEqual(buttons[0][1],{'type':'callback','text':'Next','payload':'survey:next'})
+
+
+class PollingLifecycleTests(unittest.TestCase):
+    def test_max_polling_starts_from_sqlite_marker_and_honours_stop_event(self) -> None:
+        file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); file.close()
+        store=Storage(file.name); store.set_poll_cursor('max','saved-marker')
+        stop=threading.Event(); received=[]
+        class Transport:
+            platform='max'; marker='next-marker'
+            def updates(self, offset, timeout):
+                received.append(offset); stop.set(); return []
+        engine=SimpleNamespace(store=store)
+        run_transport(Transport(),engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1),threading.RLock(),False,stop)
+        self.assertEqual(received,['saved-marker'])
+        store.close()
 
 
 class _FlakyCRM:
