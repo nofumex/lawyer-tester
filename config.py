@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _csv_ids(value: str) -> set[str]:
+    return {x.strip() for x in value.split(",") if x.strip()}
+
+
 def load_dotenv(path: str = ".env") -> None:
     file = Path(path)
     if not file.exists():
@@ -32,12 +36,14 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        admin_ids=_csv_ids(os.getenv("ADMIN_IDS", ""))
+        admin_ids.update(_csv_ids(os.getenv("MAX_ADMIN_ID", "")))
         return cls(
             database_path=os.getenv("DATABASE_PATH", "lawyer_tester.sqlite3"),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             max_token=os.getenv("MAX_BOT_TOKEN", "").strip(),
             max_api_base_url=os.getenv("MAX_API_BASE_URL", "https://platform-api2.max.ru").rstrip("/"),
-            admin_ids=frozenset(x.strip() for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()),
+            admin_ids=frozenset(admin_ids),
             amo_base_url=os.getenv("AMOCRM_BASE_URL", "").rstrip("/"),
             amo_token=os.getenv("AMOCRM_ACCESS_TOKEN", "").strip(),
             target_pipeline=os.getenv("AMOCRM_TARGET_PIPELINE_NAME", "Судебный приказ"),

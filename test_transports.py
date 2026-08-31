@@ -45,13 +45,13 @@ class MaxTransportTests(unittest.TestCase):
         self.assertEqual((callback.get_method(), callback.full_url), ('POST', 'https://max.example/answers?callback_id=cb-1'))
         self.assertEqual(json.loads(callback.data), {'notification': 'Done'})
 
-    def test_empty_callback_ack_sends_post_without_json_body(self):
+    def test_empty_callback_ack_sends_nullable_message_body(self):
         with patch('transports.urlopen', self.request):
             self.transport.answer_callback('cb-empty')
         request = self.requests[0]
         self.assertEqual((request.get_method(), request.full_url), ('POST', 'https://max.example/answers?callback_id=cb-empty'))
-        self.assertIsNone(request.data)
-        self.assertIsNone(request.get_header('Content-type'))
+        self.assertEqual(json.loads(request.data), {'message': None})
+        self.assertEqual(request.get_header('Content-type'), 'application/json')
 
     def test_callback_ack_400_logs_response_and_is_best_effort(self):
         error = HTTPError('https://max.example/answers?callback_id=bad', 400, 'bad request', {}, io.BytesIO(b'{"success":false,"message":"bad callback"}'))
@@ -66,6 +66,12 @@ class MaxTransportTests(unittest.TestCase):
             self.transport.edit('42', 'bad', 'Changed', [[{'text': 'Back', 'callback_data': 'survey:back'}]])
         self.assertIn('status=400', logs.output[0])
         self.assertIn('bad edit', logs.output[0])
+
+    def test_edit_empty_inline_removes_attachments_without_empty_buttons(self):
+        with patch('transports.urlopen', self.request):
+            self.transport.edit('42', 'mid-1', 'Done', [])
+        body = json.loads(self.requests[0].data)
+        self.assertEqual(body['attachments'], [])
 
     def test_updates_uses_marker_and_normalizes_callback_user(self):
         response = {'marker': 99, 'updates': [{'update_type': 'message_callback', 'timestamp': 1, 'chat_id': 20, 'callback': {'callback_id': 'cb', 'payload': 'survey:back', 'user': {'user_id': 7, 'name': 'Ivan'}}, 'message': {'body': {'mid': 'mid'}}}]}

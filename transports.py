@@ -142,14 +142,14 @@ class MaxTransport:
             if text:
                 self._call(path,{'notification':text})
             else:
-                self._call(path,method='POST')
+                self._call(path,{'message':None})
         except HTTPError as exc:
             if exc.code != 400:
                 raise
             body=exc.read().decode('utf-8','replace') if exc.fp else ''
             LOG.warning('MAX callback answer failed: status=%s body=%s',exc.code,body)
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
-        body={'text':text,'format':'html','attachments':[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}]}
+        body={'text':text,'format':'html','attachments':[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}] if inline else []}
         try:
             self._call('/messages?'+urlencode({'message_id':message_id}),body,method='PUT')
         except HTTPError as exc:
