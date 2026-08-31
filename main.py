@@ -15,6 +15,13 @@ from storage import Storage
 from transports import MaxTransport, TelegramTransport, Transport
 
 
+def answer_callback_best_effort(transport:Transport, callback_id:str, text:str='') -> None:
+    try:
+        transport.answer_callback(callback_id,text)
+    except Exception:
+        logging.warning('Callback acknowledgement failed (%s); continuing update processing',transport.platform,exc_info=True)
+
+
 def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, config:Config) -> None:
     message=update.get('message') or update.get('callback_query',{}).get('message') or {}
     sender=(update.get('message') or update.get('callback_query',{}).get('from') or {}).get('from') or update.get('callback_query',{}).get('from') or {}
@@ -27,7 +34,7 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     is_admin=user_id in config.admin_ids
     if callback and (callback.startswith('survey:') or callback.startswith('review:')):
         reply,prompt,edit=engine.receive_callback(transport.platform,user_id,callback)
-        if callback_query.get('id'): transport.answer_callback(str(callback_query['id']),'' if prompt else reply)
+        if callback_query.get('id'): answer_callback_best_effort(transport,str(callback_query['id']),'' if prompt else reply)
         if prompt:
             if edit and callback_query.get('message',{}).get('message_id'):
                 transport.edit(user_id,str(callback_query['message']['message_id']),prompt.text,prompt.inline or [])

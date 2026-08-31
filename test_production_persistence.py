@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 from engine import SurveyEngine
 from main import run_transport
@@ -65,6 +66,45 @@ class PollingLifecycleTests(unittest.TestCase):
         run_transport(Transport(),engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1),threading.RLock(),False,stop)
         self.assertEqual(received,['saved-marker'])
         store.close()
+
+    def test_max_callback_ack_400_does_not_block_processed_update(self) -> None:
+        file=tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False); file.close()
+        store=Storage(file.name); seed_default_test(store)
+        engine=SurveyEngine(store,None,'pipeline','status')
+        engine.begin('max','42','Max User')
+        active=store.active_attempt('max','42')
+        update={
+            '_event_id':'max-callback-once',
+            'update_id':'m1',
+            'callback_query':{
+                'id':'bad-callback',
+                'from':{'id':'42','first_name':'Max'},
+                'data':f'survey:back:{active["id"]}:{active["current_question_id"]}',
+                'message':{'message_id':'mid-1','chat':{'id':'42'}},
+            },
+        }
+        stop=threading.Event()
+        class Transport:
+            platform='max'; marker='next-marker'
+            def __init__(self): self.polls=0; self.acks=0; self.sends=0
+            def updates(self, offset, timeout):
+                self.polls+=1
+                if self.polls == 2:
+                    stop.set()
+                return [update]
+            def answer_callback(self, callback_id, text=''):
+                self.acks+=1
+                raise HTTPError('https://max.example/answers?callback_id=bad-callback',400,'bad request',{},None)
+            def edit(self, user_id, message_id, text, inline): pass
+            def send(self, *args, **kwargs): self.sends+=1
+            def delete(self, *args, **kwargs): pass
+        transport=Transport()
+        with self.assertLogs(level='WARNING'):
+            run_transport(transport,engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset()),threading.RLock(),False,stop)
+        self.assertTrue(store.update_processed('max','max-callback-once'))
+        self.assertEqual(transport.acks,1)
+        self.assertEqual(transport.sends,1)
+        engine.shutdown(); store.close()
 
 
 class _FlakyCRM:

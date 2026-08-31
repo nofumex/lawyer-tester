@@ -1,3 +1,4 @@
+import io
 import json
 import unittest
 from urllib.error import HTTPError, URLError
@@ -51,6 +52,13 @@ class MaxTransportTests(unittest.TestCase):
         self.assertEqual((request.get_method(), request.full_url), ('POST', 'https://max.example/answers?callback_id=cb-empty'))
         self.assertIsNone(request.data)
         self.assertIsNone(request.get_header('Content-type'))
+
+    def test_callback_ack_400_logs_response_and_is_best_effort(self):
+        error = HTTPError('https://max.example/answers?callback_id=bad', 400, 'bad request', {}, io.BytesIO(b'{"success":false,"message":"bad callback"}'))
+        with patch('transports.urlopen', side_effect=error), self.assertLogs('transports', level='WARNING') as logs:
+            self.transport.answer_callback('bad')
+        self.assertIn('status=400', logs.output[0])
+        self.assertIn('bad callback', logs.output[0])
 
     def test_updates_uses_marker_and_normalizes_callback_user(self):
         response = {'marker': 99, 'updates': [{'update_type': 'message_callback', 'timestamp': 1, 'chat_id': 20, 'callback': {'callback_id': 'cb', 'payload': 'survey:back', 'user': {'user_id': 7, 'name': 'Ivan'}}, 'message': {'body': {'mid': 'mid'}}}]}

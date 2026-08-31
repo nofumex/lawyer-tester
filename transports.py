@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass,field
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
+
+LOG = logging.getLogger(__name__)
 
 
 def _open_with_retry(request: Request, timeout: int = 35) -> Any:
@@ -135,10 +138,16 @@ class MaxTransport:
         return [[({'type':'link','text':button['text'],'url':button['url']} if button.get('url') else {'type':'callback','text':button['text'],'payload':button['callback_data']}) for button in row] for row in buttons]
     def answer_callback(self,callback_id:str,text:str='') -> None:
         path='/answers?'+urlencode({'callback_id':callback_id})
-        if text:
-            self._call(path,{'notification':text})
-        else:
-            self._call(path,method='POST')
+        try:
+            if text:
+                self._call(path,{'notification':text})
+            else:
+                self._call(path,method='POST')
+        except HTTPError as exc:
+            if exc.code != 400:
+                raise
+            body=exc.read().decode('utf-8','replace') if exc.fp else ''
+            LOG.warning('MAX callback answer failed: status=%s body=%s',exc.code,body)
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None:
         body={'text':text,'format':'html','attachments':[{'type':'inline_keyboard','payload':{'buttons':self._inline_buttons(inline)}}]}
         self._call('/messages?'+urlencode({'message_id':message_id}),body,method='PUT')
