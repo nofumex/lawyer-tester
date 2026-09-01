@@ -250,25 +250,31 @@ class CRMCompletionMoveTests(unittest.TestCase):
 
     def test_positive_special_answer_keeps_ready_to_cooperate_stage(self) -> None:
         attempt=self._completed_attempt_with_special_answer(self.positive['text'])
-        self.engine._run_actions(attempt,[self.positive],self.positive['text'])
         self.engine._sync_crm_after_answer(attempt['id'],'telegram',[],None,True)
-        self.assertEqual(self.crm.moves,[(42,'HH-юристы','готов к сотрудничеству')])
-        self.assertTrue(self.engine._has_selected_move_stage_action(attempt['id']))
+        self.assertEqual(self.crm.moves,[(42,'HH-юристы','Прошел тест (собес)'),(42,'HH-юристы','готов к сотрудничеству')])
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM action_executions WHERE attempt_id=?",(attempt['id'],)).fetchone()[0],1)
 
     def test_other_special_answer_gets_default_completed_stage(self) -> None:
         attempt=self._completed_attempt_with_special_answer(self.negative['text'])
         self.engine._sync_crm_after_answer(attempt['id'],'telegram',[],None,True)
         self.assertEqual(self.crm.moves,[(42,'HH-юристы','Прошел тест (собес)')])
 
+    def test_completed_legacy_positive_answer_is_reclassified_on_startup(self) -> None:
+        attempt=self._completed_attempt_with_special_answer(self.positive['text'])
+        old_key=f'action:move_stage:{attempt["id"]}:{self.positive["id"]}'
+        self.assertTrue(self.store.claim_crm_operation(old_key))
+        self.store.finish_crm_operation(old_key)
+        self.engine._sync_crm_after_answer(attempt['id'],'telegram',[],None,True)
+        self.assertEqual(self.crm.moves,[(42,'HH-юристы','Прошел тест (собес)'),(42,'HH-юристы','готов к сотрудничеству')])
+
     def test_restart_does_not_change_positive_special_stage(self) -> None:
         attempt=self._completed_attempt_with_special_answer(self.positive['text'])
-        self.engine._run_actions(attempt,[self.positive],self.positive['text'])
         self.engine._sync_crm_after_answer(attempt['id'],'telegram',[],None,True)
         self.engine.shutdown(); self.store.close()
         self.store=Storage(self.file.name)
         self.engine=SurveyEngine(self.store,self.crm,'pipeline','status')
         self.engine.resume_crm(); self.engine.shutdown()
-        self.assertEqual(self.crm.moves,[(42,'HH-юристы','готов к сотрудничеству')])
+        self.assertEqual(self.crm.moves,[(42,'HH-юристы','Прошел тест (собес)'),(42,'HH-юристы','готов к сотрудничеству')])
 
 
 class CRMActionRetryTests(unittest.TestCase):
@@ -281,13 +287,16 @@ class CRMActionRetryTests(unittest.TestCase):
         self.option=option
         attempt=self.store.start_attempt('telegram','crm-test',self.store.enabled_test()['id'])
         self.store.set_identity(attempt['id'],lead_id=42)
+        with self.store.db:
+            self.store.db.execute("UPDATE attempts SET status='completed',current_question_id=NULL WHERE id=?",(attempt['id'],))
+            self.store.db.execute('INSERT INTO answers(attempt_id,question_id,value_json,answered_at) VALUES(?,?,?,?)',(attempt['id'],self.option['question_id'],json.dumps(self.option['text'],ensure_ascii=False),1))
         self.attempt=self.store._one('SELECT * FROM attempts WHERE id=?',(attempt['id'],))
 
     def tearDown(self) -> None: self.engine.shutdown(); self.store.close()
 
     def test_crm_error_then_retry_executes_action_once(self) -> None:
-        self.engine._run_actions(self.attempt,[self.option],self.option['text'])
-        self.engine._run_actions(self.attempt,[self.option],self.option['text'])
+        self.engine._run_actions(self.attempt)
+        self.engine._run_actions(self.attempt)
         self.assertEqual(self.crm.calls,2)
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM action_executions').fetchone()[0],1)
 
@@ -296,7 +305,7 @@ class CRMActionRetryTests(unittest.TestCase):
         update_key='telegram-update-99'
         for _ in range(2):
             if not self.store.update_processed('telegram',update_key):
-                self.engine._run_actions(self.attempt,[self.option],self.option['text'])
+                self.engine._run_actions(self.attempt)
                 self.store.complete_update('telegram',update_key)
         self.assertEqual(self.crm.calls,1)
 
