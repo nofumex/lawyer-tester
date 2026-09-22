@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
+from background import cleanup
 from engine import SurveyEngine
 from main import run_transport
 from seed import seed_default_test
@@ -142,6 +143,7 @@ class PollingLifecycleTests(unittest.TestCase):
         transport=Transport()
         with self.assertLogs(level='WARNING'):
             run_transport(transport,engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset()),threading.RLock(),False,stop)
+            cleanup.queue.join()
         self.assertTrue(store.update_processed('max','max-callback-once'))
         self.assertEqual(transport.acks,1)
         self.assertEqual(transport.sends,1)
@@ -167,6 +169,7 @@ class PollingLifecycleTests(unittest.TestCase):
         }
         stop=threading.Event(); transport=self.RecordingMaxTransport(update,stop)
         run_transport(transport,engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset()),threading.RLock(),False,stop)
+        cleanup.queue.join()
         answer=next(call for call in transport.calls if call[0].startswith('/answers?'))
         self.assertIn('message',answer[1])
         self.assertIn('attachments',answer[1]['message'])
@@ -194,6 +197,7 @@ class PollingLifecycleTests(unittest.TestCase):
         }
         stop=threading.Event(); transport=self.RecordingMaxTransport(update,stop)
         run_transport(transport,engine,None,SimpleNamespace(poll_timeout=1,inactivity_seconds=1,admin_ids=frozenset()),threading.RLock(),False,stop)
+        cleanup.queue.join()
         answer=next(call for call in transport.calls if call[0].startswith('/answers?'))
         message=next(call for call in transport.calls if call[0].startswith('/messages?user_id='))
         self.assertEqual(answer[1],{'notification':'OK'})

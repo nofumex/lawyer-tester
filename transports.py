@@ -9,6 +9,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
+from background import cleanup
+
 LOG = logging.getLogger(__name__)
 MAX_CALLBACK_ACK_TEXT = 'OK'
 
@@ -71,8 +73,7 @@ class TelegramTransport:
         previous=self._last_message.get(str(user_id));current=int(result['message_id'])
         self._last_message[str(user_id)]=current
         if previous and previous!=current:
-            try:self._call('deleteMessage',{'chat_id':user_id,'message_id':previous})
-            except Exception:pass
+            cleanup.submit(self.delete,user_id,str(previous))
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None:
         markup={'inline_keyboard':buttons} if buttons else None
         kind=payload.get('kind','text'); text=payload.get('text',''); body={'chat_id':user_id,'caption' if kind!='text' else 'text':text}

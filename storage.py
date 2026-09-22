@@ -13,6 +13,7 @@ class _LockedConnection:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
         self._lock = threading.RLock()
+        self._depth = 0
 
     def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
         with self._lock:
@@ -24,26 +25,38 @@ class _LockedConnection:
 
     def commit(self) -> None:
         with self._lock:
-            self._connection.commit()
+            if not self._depth:
+                self._connection.commit()
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
 
-    def __enter__(self) -> sqlite3.Connection:
+    def __enter__(self):
         self._lock.acquire()
-        return self._connection.__enter__()
-
-    def __exit__(self, *args: Any) -> bool | None:
         try:
-            return self._connection.__exit__(*args)
+            self._connection.execute(f'SAVEPOINT nested_{self._depth}')
+        except Exception:
+            self._lock.release()
+            raise
+        self._depth += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self._depth -= 1
+            name = f'nested_{self._depth}'
+            if exc_type is not None:
+                self._connection.execute(f'ROLLBACK TO {name}')
+            self._connection.execute(f'RELEASE {name}')
         finally:
             self._lock.release()
+        return False
 
 
 class Storage:
     def __init__(self, path: str) -> None:
-        self.db = sqlite3.connect(Path(path), check_same_thread=False)
+        self.db = sqlite3.connect(Path(path), check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
@@ -61,6 +74,11 @@ class Storage:
         CREATE TABLE IF NOT EXISTS admin_drafts(platform TEXT NOT NULL,user_id TEXT NOT NULL,kind TEXT NOT NULL,payload_json TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(platform,user_id));
         CREATE TABLE IF NOT EXISTS poll_cursors(platform TEXT PRIMARY KEY,cursor TEXT NOT NULL,updated_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS incoming_updates(platform TEXT NOT NULL,update_key TEXT NOT NULL,processed_at INTEGER NOT NULL,PRIMARY KEY(platform,update_key));
+        CREATE TABLE IF NOT EXISTS update_queue(
+            id INTEGER PRIMARY KEY, platform TEXT NOT NULL, update_key TEXT NOT NULL,
+            user_id TEXT NOT NULL, payload TEXT NOT NULL, responses TEXT,
+            response_index INTEGER NOT NULL DEFAULT 0, UNIQUE(platform,update_key));
+        CREATE INDEX IF NOT EXISTS idx_update_queue_user ON update_queue(platform,user_id,id);
         CREATE TABLE IF NOT EXISTS crm_operations(operation_key TEXT PRIMARY KEY,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
         """)
         if 'amo_created' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
@@ -97,6 +115,17 @@ class Storage:
             return False
     def update_processed(self, platform: str, update_key: str) -> bool:
         return self._one('SELECT 1 FROM incoming_updates WHERE platform=? AND update_key=?',(platform,update_key)) is not None
+    def enqueue_updates(self, platform, updates, cursor):
+        # Receipt and provider acknowledgement are atomic. Pending work survives
+        # a crash even when Telegram/MAX have already advanced their cursor.
+        with self.db:
+            for key, user_id, update in updates:
+                if not self.update_processed(platform, key):
+                    self.db.execute('INSERT OR IGNORE INTO update_queue(platform,update_key,user_id,payload) VALUES(?,?,?,?)',
+                                    (platform,key,user_id,json.dumps(update | {'_received_at':time.time()},ensure_ascii=False)))
+            if cursor is not None:
+                self.set_poll_cursor(platform,cursor)
+
     def claim_crm_operation(self, operation_key: str) -> bool:
         """Claim one external CRM side effect; completed/running claims survive restarts."""
         now=int(time.time())
@@ -141,8 +170,9 @@ class Storage:
             self.db.execute("UPDATE attempts SET status='completed',current_question_id=NULL,edit_question_id=NULL,last_activity_at=? WHERE id=?",(now,attempt_id))
             self.db.execute('DELETE FROM draft_answers WHERE attempt_id=? AND question_id=?',(attempt_id,question_id))
     def set_identity(self, attempt_id:int, full_name: str | None=None, phone: str | None=None, lead_id: int | None=None, amo_created:bool|None=None) -> None:
-        row=self._one("SELECT full_name,phone,amo_lead_id FROM attempts WHERE id=?",(attempt_id,)); assert row
-        self.db.execute("UPDATE attempts SET full_name=?,phone=?,amo_lead_id=?,amo_created=COALESCE(?,amo_created) WHERE id=?",(full_name or row['full_name'],phone or row['phone'],lead_id if lead_id is not None else row['amo_lead_id'],None if amo_created is None else int(amo_created),attempt_id)); self.db.commit()
+        with self.db:
+            row=self._one("SELECT full_name,phone,amo_lead_id FROM attempts WHERE id=?",(attempt_id,)); assert row
+            self.db.execute("UPDATE attempts SET full_name=?,phone=?,amo_lead_id=?,amo_created=COALESCE(?,amo_created) WHERE id=?",(full_name or row['full_name'],phone or row['phone'],lead_id if lead_id is not None else row['amo_lead_id'],None if amo_created is None else int(amo_created),attempt_id)); self.db.commit()
     def mark(self, attempt_id:int, column:str, value: int=1) -> None: self.db.execute(f"UPDATE attempts SET {column}=? WHERE id=?",(value,attempt_id)); self.db.commit()
     def claim_amo_link(self,attempt_id:int)->bool:
         with self.db:

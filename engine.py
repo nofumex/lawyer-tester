@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -272,9 +273,25 @@ class SurveyEngine:
         sent=0
         for attempt in self.store.stale_attempts(cutoff):
             if attempt['amo_lead_id'] and self.crm:
-                operation_key=f'snapshot:{attempt["id"]}:{attempt["snapshot_version"]}'
-                if not self.store.claim_crm_operation(operation_key): continue
-                try: self.crm.add_note(int(attempt['amo_lead_id']),self.result_text(attempt,False)); self.store.mark(attempt['id'],'snapshot_version',1); sent+=1
+                # Capture a consistent local snapshot, then release SQLite
+                # before any CRM I/O. Content keys also survive back/edit flows.
+                with self.store.db:
+                    attempt=self.store._one('SELECT * FROM attempts WHERE id=?',(attempt['id'],))
+                    if not attempt or attempt['status']!='active' or attempt['last_activity_at']>cutoff:
+                        continue
+                    text=self.result_text(attempt,False)
+                    revision=hashlib.sha256(text.encode()).hexdigest()[:24]
+                    operation_key=f'snapshot-v2:{attempt["id"]}:{revision}'
+                    if not self.store.claim_crm_operation(operation_key): continue
+                try:
+                    marker=f'\u2063lawyer-tester:{operation_key}'
+                    if not getattr(self.crm,'has_note',lambda *_:False)(int(attempt['amo_lead_id']),marker):
+                        self.crm.add_note(int(attempt['amo_lead_id']),text+marker)
+                    with self.store.db:
+                        fresh=self.store._one('SELECT * FROM attempts WHERE id=?',(attempt['id'],))
+                        if fresh and fresh['status']=='active' and self.result_text(fresh,False)==text:
+                            self.store.mark(attempt['id'],'snapshot_version',1)
+                    sent+=1
                 except Exception:
                     self.store.fail_crm_operation(operation_key); LOG.exception('Unable to save inactivity snapshot for %s',attempt['id'])
                 else:self.store.finish_crm_operation(operation_key)

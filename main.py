@@ -6,6 +6,9 @@ import threading
 import time
 from html import escape
 
+from background import latency
+from dispatch import UpdateDispatcher
+
 from admin import Admin
 from amocrm import AmoClient
 from config import Config, load_dotenv
@@ -67,11 +70,15 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     if callback and callback.startswith('a:'):
         if is_admin:
             if callback=='a:castsend':
+                if hasattr(transport,'defer_broadcast'):
+                    transport.defer_broadcast(update); return
                 threading.Thread(target=_finish_broadcast,args=(admin,transport.platform,user_id,transports or {transport.platform:transport},transport),name='broadcast-worker',daemon=True).start()
                 return
             reply,keyboard=admin.callback(transport.platform,user_id,callback); transport.send(user_id,reply,inline=keyboard)
         return
     if text.startswith('/test_search'):
+        if hasattr(transport,'defer_search'):
+            transport.defer_search(update); return
         if not is_admin: transport.send(user_id,'Недостаточно прав.');return
         query=text.partition(' ')[2].strip()
         if not query:transport.send(user_id,'Использование: /test_search Фамилия Имя Отчество');return
@@ -108,44 +115,44 @@ def run_transport(transport:Transport, engine:SurveyEngine, admin:Admin, config:
     stop_event=stop_event or threading.Event()
     stored_cursor=engine.store.poll_cursor(transport.platform)
     offset=int(stored_cursor) if transport.platform=='telegram' and stored_cursor is not None else stored_cursor
-    last_snapshot=0
-    while not stop_event.is_set():
-        try:
-            updates=transport.updates(offset,config.poll_timeout)
-        except Exception:
-            logging.exception('Cannot receive updates (%s). Check that only one bot process uses this token.',transport.platform)
-            stop_event.wait(3)
-            continue
-        batch_ok=True
-        for update in updates:
+    dispatcher=UpdateDispatcher(transport,engine,admin,config,transports,handle)
+    snapshot_thread=None
+    if run_snapshots:
+        def snapshots():
+            while not stop_event.is_set():
+                try:
+                    with latency('snapshots'):
+                        engine.send_snapshots(int(time.time())-config.inactivity_seconds)
+                except Exception:
+                    logging.exception('Snapshots failed')
+                stop_event.wait(60)
+        snapshot_thread=threading.Thread(target=snapshots,name='snapshots',daemon=True)
+        snapshot_thread.start()
+    try:
+        while not stop_event.is_set():
             try:
-                with processing_lock:
-                    update_key=str(update.get('_event_id') or update.get('update_id') or '')
-                    if not update_key or engine.store.update_processed(transport.platform,update_key):
-                        continue
-                handle(transport,update,engine,admin,config,transports)
-                incoming=update.get('message') or {}
-                if incoming.get('message_id'):
-                    try:transport.delete(str(incoming.get('chat',{}).get('id') or incoming.get('from',{}).get('id')),str(incoming['message_id']))
-                    except Exception:logging.debug('Cannot delete incoming message',exc_info=True)
-                with processing_lock:
-                    if transport.platform=='telegram':
-                        offset=max(offset or 0,int(update['update_id'])+1)
-                        engine.store.complete_update(transport.platform,update_key,offset)
-                    else:
-                        engine.store.complete_update(transport.platform,update_key)
+                updates=transport.updates(offset,config.poll_timeout)
+                with latency('poll.persist',platform=transport.platform):
+                    entries=[]
+                    cursor=offset
+                    for update in updates:
+                        key=str(update.get('_event_id') or update.get('update_id', ''))
+                        if not key: continue
+                        entries.append((key,dispatcher.user_id(update),update))
+                        if transport.platform=='telegram':
+                            cursor=max(cursor or 0,int(update['update_id'])+1)
+                    if transport.platform=='max': cursor=getattr(transport,'marker',None)
+                    engine.store.enqueue_updates(transport.platform,entries,cursor)
+                    offset=cursor
+                dispatcher.wake.set()
             except Exception:
-                logging.exception('Update processing failed (%s)',transport.platform)
-                batch_ok=False
-        # A MAX marker acknowledges the whole fetched page.  Save it only after
-        # every event has completed; per-event de-duplication makes replay safe.
-        if transport.platform=='max' and batch_ok and getattr(transport,'marker',None) is not None:
-            engine.store.set_poll_cursor(transport.platform,transport.marker)
-            offset=transport.marker
-        if run_snapshots and not stop_event.is_set() and time.time()-last_snapshot>60:
-            with processing_lock:
-                engine.send_snapshots(int(time.time())-config.inactivity_seconds)
-            last_snapshot=time.time()
+                if transport.platform=='max': transport.marker=offset
+                logging.exception('Cannot receive/persist updates (%s)',transport.platform)
+                stop_event.wait(3)
+    finally:
+        dispatcher.close()
+        if snapshot_thread is not None:
+            snapshot_thread.join()
 
 
 def main() -> int:

@@ -4,6 +4,7 @@ import json
 import logging
 import time
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -23,7 +24,13 @@ class AmoClient:
     requests_per_second: float = 4.0
     _last_request: float = field(init=False, default=0.0)
 
+    _request_lock: Any = field(init=False, default_factory=threading.Lock, repr=False)
+
     def request(self, method: str, path: str, *, params: dict[str, Any] | None = None, body: Any = None) -> Any:
+        with self._request_lock:
+            return self._request(method,path,params=params,body=body)
+
+    def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None, body: Any = None) -> Any:
         if not self.base_url or not self.access_token:
             raise AmoError("amoCRM is not configured")
         url = self.base_url.rstrip("/") + path
