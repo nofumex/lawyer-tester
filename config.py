@@ -27,6 +27,7 @@ class Config:
     max_token: str
     max_api_base_url: str
     admin_ids: frozenset[str]
+    manager_ids: frozenset[str]
     amo_base_url: str
     amo_token: str
     target_pipeline: str
@@ -53,6 +54,7 @@ class Config:
             max_token=os.getenv("MAX_BOT_TOKEN", "").strip(),
             max_api_base_url=os.getenv("MAX_API_BASE_URL", "https://platform-api2.max.ru").rstrip("/"),
             admin_ids=frozenset(admin_ids),
+            manager_ids=frozenset(_csv_ids(os.getenv("MANAGER_IDS", ""))),
             amo_base_url=os.getenv("AMOCRM_BASE_URL", "").rstrip("/"),
             amo_token=os.getenv("AMOCRM_ACCESS_TOKEN", "").strip(),
             target_pipeline=os.getenv("AMOCRM_TARGET_PIPELINE_NAME", "Судебный приказ"),

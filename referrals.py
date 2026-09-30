@@ -72,15 +72,36 @@ class AgentProgram:
 
     def _notify_new_lead(self, platform: str, lead_id: int, agent_user_id: str,
                          client_name: str, phone: str) -> None:
-        transport = self.transports.get(platform)
+        # MANAGER_IDS always contains Telegram account IDs, including when the
+        # client was submitted through MAX.
+        transport = self.transports.get("telegram")
         if not transport:
+            LOG.warning("Cannot notify managers about lead %s: Telegram transport is unavailable", lead_id)
             return
-        text = (f"<b>Новый клиент партнёрской программы А7 Консалт #{lead_id}</b>\n"
-                f"Агент: {platform}/{escape(agent_user_id)}\n"
-                f"Клиент: {escape(client_name)}\nТелефон: <code>{escape(phone)}</code>")
-        for manager_id in self.config.admin_ids:
-            if str(manager_id) != agent_user_id:
-                self._safe_send(transport, str(manager_id), text)
+        agent = self.store._one(
+            "SELECT display_name FROM users WHERE platform=? AND user_id=?",
+            (platform, agent_user_id),
+        )
+        lead = self.store._one("SELECT * FROM referral_leads WHERE id=?", (lead_id,))
+        agent_name = str(agent["display_name"] or agent_user_id) if agent else agent_user_id
+        platform_name = "MAX" if platform == "max" else "Telegram"
+        created = time.strftime("%d.%m.%Y %H:%M", time.localtime(int(lead["created_at"]))) if lead else "неизвестно"
+        relation = str(lead["relation_to_agent"] or "не указана") if lead else "не указана"
+        payout_phone = str(lead["agent_payout_phone"] or "не указан") if lead else "не указан"
+        text = (
+            "<b>Новый клиент от юриста</b>\n\n"
+            f"<b>Клиент от агента #{lead_id}</b>\n"
+            "<b>Статус:</b> Новая\n"
+            f"<b>Дата:</b> {created}\n\n"
+            f"<b>Контакт:</b> {escape(client_name)}\n"
+            f"<b>Телефон:</b> <code>{escape(phone)}</code>\n"
+            f"<b>Связь с агентом:</b> {escape(relation)}\n"
+            f"<b>Телефон агента для выплаты:</b> <code>{escape(payout_phone)}</code>\n\n"
+            f"<b>Агент:</b> {escape(agent_name)}\n"
+            f"<b>{platform_name} ID:</b> <code>{escape(agent_user_id)}</code>"
+        )
+        for manager_id in self.config.manager_ids:
+            self._safe_send(transport, str(manager_id), text)
 
     def _session(self, platform: str, user_id: str) -> tuple[str, dict[str, Any]] | None:
         row = self.store._one("SELECT state,data_json FROM agent_sessions WHERE platform=? AND user_id=?", (platform, user_id))
@@ -411,12 +432,8 @@ class AgentProgram:
             with self.store.db:
                 self.store.db.execute("UPDATE referral_leads SET warning_answer=?,updated_at=? WHERE id=?", (answer, int(time.time()), lead_id))
             self.executor.submit(self._sync_followup, lead_id, "warning_answer", "Получится предупредить знакомого")
-            if data.endswith("no"):
-                self._clear_session(platform, user_id)
-                transport.send(user_id, "Спасибо! Клиент передан менеджеру А7 Консалт.", inline=self.menu())
-            else:
-                self._set_session(platform, user_id, "client_call", payload)
-                transport.send(user_id, "Получится передать знакомому номер телефона менеджера, который ему позвонит?", inline=[[button("Да", "agent:call:yes"), button("Нет", "agent:call:no")]])
+            self._clear_session(platform, user_id)
+            transport.send(user_id, "Спасибо! Клиент передан менеджеру А7 Консалт.", inline=self.menu())
             return True
         if state == "client_call" and data.startswith("agent:call:"):
             answer = "Да" if data.endswith("yes") else "Нет"

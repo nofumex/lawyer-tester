@@ -34,7 +34,8 @@ class ReferralTests(unittest.TestCase):
         self.mailings=MailingService(self.store,self.transports,1);self.mailings.reconcile_all()
         self.config=SimpleNamespace(a7_offer_url='',default_bonus_per_client=10000,second_level_bonus=5000,
             telegram_bot_username='a7_bot',max_bot_link='https://max.ru/a7',manager_contact_url='',
-            admin_ids=frozenset({'99'}),referral_pipeline='[A7] TG / Max - Боты',referral_status='')
+            admin_ids=frozenset({'99'}),manager_ids=frozenset({'88','89'}),
+            referral_pipeline='[A7] TG / Max - Боты',referral_status='')
         self.program=AgentProgram(self.store,self.config,None,self.mailings,self.transports)
 
     def tearDown(self):
@@ -61,9 +62,9 @@ class ReferralTests(unittest.TestCase):
         for value in ('знакомый','да','8 999 222-33-44'):
             self.assertTrue(self.program.handle_text(self.transport,'telegram','1',value))
         self.program.handle_callback(self.transport,'telegram','1','agent:warn:yes')
-        self.program.handle_callback(self.transport,'telegram','1','agent:call:no')
         lead=self.store._one("SELECT * FROM referral_leads")
-        self.assertEqual((lead['phone'],lead['warning_answer'],lead['call_phone_answer']),('+79991112233','Да','Нет'))
+        self.assertEqual((lead['phone'],lead['warning_answer'],lead['call_phone_answer']),('+79991112233','Да',None))
+        self.assertIsNone(self.program._session('telegram','1'))
         self.assertEqual(self.store._one("SELECT stopped_reason FROM mailing_states")['stopped_reason'],'client_transferred')
         self.program.handle_callback(self.transport,'telegram','1','agent:new_client')
         for value in ('Иван снова','8 999 111-22-33','знакомый','да','8 999 222-33-44'):
@@ -135,6 +136,19 @@ class ReferralTests(unittest.TestCase):
             self.assertEqual((row['agent_platform'],row['agent_user_id'],row['source'],row['platform'],row['amo_lead_id']),('telegram','1','agent_form','telegram',501))
             program._sync_lead(lead_id)
             self.assertEqual(len(crm.created),1)
+        finally:
+            program.close()
+
+    def test_new_client_notification_always_goes_to_telegram_managers(self):
+        max_transport=FakeTransport()
+        program=AgentProgram(self.store,self.config,None,self.mailings,{'telegram':self.transport,'max':max_transport})
+        try:
+            program._notify_new_lead('max',42,'max-agent','Иван','+79991112233')
+            self.assertEqual({message[0] for message in self.transport.sent},{'88','89'})
+            self.assertEqual(max_transport.sent,[])
+            for _,text,_ in self.transport.sent:
+                self.assertIn('<b>Новый клиент от юриста</b>',text)
+                self.assertIn('<b>MAX ID:</b>',text)
         finally:
             program.close()
 

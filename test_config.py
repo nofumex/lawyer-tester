@@ -13,5 +13,10 @@ class ConfigTests(unittest.TestCase):
             config=Config.from_env()
         self.assertEqual(config.admin_ids, frozenset({'1','2','185607445'}))
 
+    def test_manager_ids_are_telegram_recipients(self) -> None:
+        with patch.dict(os.environ, {'MANAGER_IDS':'8608404966,7727079839'}, clear=True):
+            config=Config.from_env()
+        self.assertEqual(config.manager_ids, frozenset({'8608404966','7727079839'}))
+
 
 if __name__=='__main__': unittest.main()
