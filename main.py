@@ -193,7 +193,7 @@ def main() -> int:
         transports.append(MaxTransport(config.max_token,config.max_api_base_url,marker=store.poll_cursor('max')))
     if not transports: raise SystemExit('Configure TELEGRAM_BOT_TOKEN or MAX_BOT_TOKEN + MAX_API_BASE_URL')
     transports_by_platform={transport.platform:transport for transport in transports}
-    mailings=MailingService(store,transports_by_platform,config.mailing_interval_seconds)
+    mailings=MailingService(store,transports_by_platform,config.mailing_interval_seconds,crm)
     agent_program=AgentProgram(store,config,crm,mailings,transports_by_platform)
     engine.mailing_service=mailings
     engine.agent_program=agent_program

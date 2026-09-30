@@ -69,6 +69,7 @@ class MailingService:
     store: Any
     transports: dict[str, Any]
     interval_seconds: int = 30
+    crm: Any = None
 
     def setting(self, key: str, default: str = "") -> str:
         row = self.store._one("SELECT value FROM app_settings WHERE key=?", (key,))
@@ -280,6 +281,7 @@ class MailingService:
         sent_at = int(time.time())
         with self.store.db:
             self.store.db.execute("UPDATE mailing_jobs SET status='sent',sent_at=?,lease_until=NULL,error_message=NULL WHERE id=?", (sent_at, job_id))
+            self._enqueue_crm_note(job, sent_at)
             self.store.db.execute(
                 "UPDATE mailing_states SET last_sent_step=?,last_sent_at=?,next_step=?,overdue=0,updated_at=? WHERE platform=? AND user_id=?",
                 (job["step"], sent_at, int(job["step"]) + 1, sent_at, job["platform"], job["user_id"]),
@@ -287,6 +289,80 @@ class MailingService:
             self._schedule(str(job["platform"]), str(job["user_id"]), int(job["group_no"]), int(job["step"]) + 1,
                            due_for_step(int(job["group_no"]), int(job["step"]) + 1, sent_at))
         return True
+
+    def _enqueue_crm_note(self, job: Any, sent_at: int) -> None:
+        sent_label = time.strftime("%d.%m.%Y %H:%M:%S", time.localtime(sent_at))
+        channel = "Telegram" if str(job["platform"]) == "telegram" else "MAX"
+        text = message_for(int(job["group_no"]), int(job["step"]))
+        note = (
+            "Отправлено сообщение автоматической партнёрской рассылки.\n"
+            f"Дата: {sent_label}\n"
+            f"Канал: {channel}\n"
+            f"Группа: {job['group_no']}\n"
+            f"Номер сообщения: {job['step']}\n\n"
+            f"Полный текст сообщения:\n{text}"
+        )
+        self.store.db.execute(
+            "INSERT OR IGNORE INTO mailing_crm_notes(job_id,note_text,status,created_at) VALUES(?,?,'pending',?)",
+            (job["id"], note, sent_at),
+        )
+
+    def sync_crm_note(self, note_id: int) -> bool:
+        if not self.crm:
+            return False
+        now = int(time.time())
+        with self.store.db:
+            claimed = self.store.db.execute(
+                "UPDATE mailing_crm_notes SET status='processing',attempts=attempts+1,lease_until=?,error_message=NULL "
+                "WHERE id=? AND (status='pending' OR (status='processing' AND (lease_until IS NULL OR lease_until<?)))",
+                (now + LEASE_SECONDS, note_id, now),
+            )
+            if claimed.rowcount != 1:
+                return False
+        row = self.store._one(
+            "SELECT n.*,j.platform,j.user_id FROM mailing_crm_notes n JOIN mailing_jobs j ON j.id=n.job_id WHERE n.id=?",
+            (note_id,),
+        )
+        attempt = self.store._one(
+            "SELECT amo_lead_id FROM attempts WHERE user_platform=? AND user_id=? AND amo_lead_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (row["platform"], row["user_id"]),
+        ) if row else None
+        if not row or not attempt:
+            with self.store.db:
+                self.store.db.execute(
+                    "UPDATE mailing_crm_notes SET status='pending',lease_until=NULL,error_message='Сделка юриста ещё не привязана' WHERE id=?",
+                    (note_id,),
+                )
+            return False
+        marker = f"\u2063lawyer-tester:mailing-message:{row['job_id']}"
+        try:
+            lead_id = int(attempt["amo_lead_id"])
+            if not self.crm.has_note(lead_id, marker):
+                self.crm.add_note(lead_id, str(row["note_text"]) + marker)
+        except Exception as exc:
+            with self.store.db:
+                self.store.db.execute(
+                    "UPDATE mailing_crm_notes SET status='pending',lease_until=NULL,error_message=? WHERE id=?",
+                    (str(exc)[:1000], note_id),
+                )
+            LOG.exception("Mailing amoCRM note sync failed note_id=%s", note_id)
+            return False
+        with self.store.db:
+            self.store.db.execute(
+                "UPDATE mailing_crm_notes SET status='done',lease_until=NULL,completed_at=?,error_message=NULL WHERE id=?",
+                (int(time.time()), note_id),
+            )
+        return True
+
+    def retry_crm_notes(self, limit: int = 100) -> int:
+        if not self.crm:
+            return 0
+        now = int(time.time())
+        rows = self.store.db.execute(
+            "SELECT id FROM mailing_crm_notes WHERE status='pending' OR (status='processing' AND (lease_until IS NULL OR lease_until<?)) ORDER BY id LIMIT ?",
+            (now, limit),
+        ).fetchall()
+        return sum(1 for row in rows if self.sync_crm_note(int(row["id"])))
 
     def recover_expired_claims(self) -> int:
         now = int(time.time())
@@ -314,6 +390,7 @@ class MailingService:
                 "UPDATE mailing_jobs SET status='sent',sent_at=?,lease_until=NULL,uncertain_at=NULL,error_message=NULL WHERE id=?",
                 (int(job["claimed_at"] or now), job_id),
             )
+            self._enqueue_crm_note(job, int(job["claimed_at"] or now))
             self.store.db.execute(
                 "UPDATE mailing_states SET last_sent_step=?,last_sent_at=?,next_step=?,overdue=0,updated_at=? WHERE platform=? AND user_id=?",
                 (job["step"], int(job["claimed_at"] or now), int(job["step"]) + 1, now, job["platform"], job["user_id"]),
@@ -342,6 +419,7 @@ class MailingService:
             try:
                 self.reconcile_all()
                 self.recover_expired_claims()
+                self.retry_crm_notes()
                 self.resume_paused()
                 if not self.enabled():
                     self.quarantine_due()

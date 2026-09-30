@@ -48,8 +48,11 @@ class AgentProgram:
                 ).fetchall():
                     self._sync_lead(int(row["id"]))
                 for row in self.store.db.execute(
-                    "SELECT id FROM referral_leads WHERE amo_lead_id IS NOT NULL AND (warning_answer IS NOT NULL OR call_phone_answer IS NOT NULL) ORDER BY id LIMIT 100"
+                    "SELECT id FROM referral_leads WHERE amo_lead_id IS NOT NULL AND (relation_to_agent IS NOT NULL OR source_permission IS NOT NULL OR agent_payout_phone IS NOT NULL OR warning_answer IS NOT NULL OR call_phone_answer IS NOT NULL) ORDER BY id LIMIT 100"
                 ).fetchall():
+                    self._sync_followup(int(row["id"]), "relation_to_agent", "Связь клиента с агентом")
+                    self._sync_followup(int(row["id"]), "source_permission", "Можно сообщить источник контакта")
+                    self._sync_followup(int(row["id"]), "agent_payout_phone", "Телефон агента для выплаты")
                     self._sync_followup(int(row["id"]), "warning_answer", "Получится предупредить знакомого")
                     self._sync_followup(int(row["id"]), "call_phone_answer", "Получится передать номер звонящего менеджера")
                 for row in self.store.db.execute(
@@ -144,7 +147,6 @@ class AgentProgram:
         offer = button("Ознакомиться с офертой", url=self.config.a7_offer_url) if self.config.a7_offer_url else button("Ознакомиться с офертой", "agent:offer")
         return [
             [button("+ Новый клиент", "agent:new_client")],
-            [button("Реферальная ссылка", "agent:ref_url")],
             [button("Правила программы", "agent:rules"), offer],
             [button("Заработанные бонусы", "agent:bonuses"), button("Профиль", "profile:show")],
             [button("Связь с менеджером", "chat:start_agent")],
@@ -156,8 +158,7 @@ class AgentProgram:
         return [[button("Пройти или продолжить тестирование", "user:test")], [button("Партнёрская программа", "agent:menu")]]
 
     def profile_menu(self) -> list[list[dict[str, str]]]:
-        return [[button("Реферальная ссылка", "agent:ref_url")],
-                [button("Мои рефералы", "agent:referrals")],
+        return [[button("Мои рефералы", "agent:referrals")],
                 [button("+ Новый клиент", "agent:new_client")],
                 [button("Связь с менеджером", "chat:start_agent")],
                 [button("Главное меню", "user:main")]]
@@ -275,11 +276,15 @@ class AgentProgram:
             LOG.exception("Cannot sync referral lead %s", lead_id)
         else:
             self.store.finish_crm_operation(key)
+            self._sync_followup(lead_id, "relation_to_agent", "Связь клиента с агентом")
+            self._sync_followup(lead_id, "source_permission", "Можно сообщить источник контакта")
+            self._sync_followup(lead_id, "agent_payout_phone", "Телефон агента для выплаты")
             self._sync_followup(lead_id, "warning_answer", "Получится предупредить знакомого")
             self._sync_followup(lead_id, "call_phone_answer", "Получится передать номер звонящего менеджера")
 
     def _sync_followup(self, lead_id: int, column: str, label: str) -> None:
-        if not self.crm or column not in {"warning_answer", "call_phone_answer"}:
+        allowed = {"relation_to_agent", "source_permission", "agent_payout_phone", "warning_answer", "call_phone_answer"}
+        if not self.crm or column not in allowed:
             return
         lead = self.store._one("SELECT * FROM referral_leads WHERE id=?", (lead_id,))
         if not lead or not lead["amo_lead_id"] or not lead[column]:
@@ -297,6 +302,29 @@ class AgentProgram:
             LOG.exception("Cannot sync referral follow-up lead_id=%s field=%s", lead_id, column)
         else:
             self.store.finish_crm_operation(key)
+
+    def _ensure_collecting_lead(self, platform: str, user_id: str, data: dict[str, Any]) -> int | None:
+        now = int(time.time())
+        phone_normalized = re.sub(r"\D", "", data["phone"])
+        duplicate = self.store._one(
+            "SELECT id FROM referral_leads WHERE phone_normalized=? AND submission_key<>? AND status<>'draft'",
+            (phone_normalized, data["submission_key"]),
+        )
+        if duplicate:
+            return None
+        with self.store.db:
+            self.store.db.execute(
+                "INSERT OR IGNORE INTO referral_leads(submission_key,agent_platform,agent_user_id,source,platform,client_name,phone,phone_normalized,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?, 'collecting',?,?)",
+                (data["submission_key"], platform, user_id, "agent_form", platform, data["client_name"], data["phone"], phone_normalized, now, now),
+            )
+            lead = self.store._one("SELECT id FROM referral_leads WHERE submission_key=?", (data["submission_key"],))
+            if lead:
+                self.store.db.execute(
+                    "UPDATE referral_leads SET client_name=?,phone=?,phone_normalized=?,status=CASE WHEN status='draft' THEN 'collecting' ELSE status END,updated_at=? WHERE id=?",
+                    (data["client_name"], data["phone"], phone_normalized, now, lead["id"]),
+                )
+        return int(lead["id"]) if lead else None
 
     def handle_callback(self, transport: Any, platform: str, user_id: str, data: str) -> bool:
         if data == "mail:disable":
@@ -424,16 +452,44 @@ class AgentProgram:
                 transport.send(user_id, "Телефон выглядит некорректно. Введите номер ещё раз.")
                 return True
             data["phone"] = phone
+            lead_id = self._ensure_collecting_lead(platform, user_id, data)
+            if lead_id is None:
+                self._clear_session(platform, user_id)
+                transport.send(user_id, "Этот клиент уже зарегистрирован в партнёрской программе. Повторная заявка не создана.", inline=self.menu())
+                return True
+            data["lead_id"] = lead_id
+            self.mailings.disable(platform, user_id, "client_transferred")
+            self.executor.submit(self._sync_lead, lead_id)
             self._set_session(platform, user_id, "client_relation", data)
             transport.send(user_id, "Кем клиент вам приходится? Может ли он на вас сослаться?")
             return True
         if state == "client_relation":
+            lead_id = int(data.get("lead_id") or self._ensure_collecting_lead(platform, user_id, data) or 0)
+            if not lead_id:
+                self._clear_session(platform, user_id)
+                transport.send(user_id, "Этот клиент уже зарегистрирован в партнёрской программе. Повторная заявка не создана.", inline=self.menu())
+                return True
+            data["lead_id"] = lead_id
             data["relation_to_agent"] = clean[:255] or "не указано"
+            with self.store.db:
+                self.store.db.execute("UPDATE referral_leads SET relation_to_agent=?,updated_at=? WHERE id=?", (data["relation_to_agent"], int(time.time()), lead_id))
+            self.executor.submit(self._sync_lead, lead_id)
+            self.executor.submit(self._sync_followup, lead_id, "relation_to_agent", "Связь клиента с агентом")
             self._set_session(platform, user_id, "client_permission", data)
             transport.send(user_id, "Можно ли сообщить, что номер получили от вас?")
             return True
         if state == "client_permission":
+            lead_id = int(data.get("lead_id") or self._ensure_collecting_lead(platform, user_id, data) or 0)
+            if not lead_id:
+                self._clear_session(platform, user_id)
+                transport.send(user_id, "Этот клиент уже зарегистрирован в партнёрской программе. Повторная заявка не создана.", inline=self.menu())
+                return True
+            data["lead_id"] = lead_id
             data["source_permission"] = clean[:255] or "не указано"
+            with self.store.db:
+                self.store.db.execute("UPDATE referral_leads SET source_permission=?,updated_at=? WHERE id=?", (data["source_permission"], int(time.time()), lead_id))
+            self.executor.submit(self._sync_lead, lead_id)
+            self.executor.submit(self._sync_followup, lead_id, "source_permission", "Можно сообщить источник контакта")
             self._set_session(platform, user_id, "client_payout", data)
             transport.send(user_id, "По какому номеру с вами связываться для выплаты бонуса?")
             return True
@@ -443,25 +499,23 @@ class AgentProgram:
                 transport.send(user_id, "Телефон выглядит некорректно. Введите номер ещё раз.")
                 return True
             now = int(time.time())
-            phone_normalized = re.sub(r'\D', '', data["phone"])
-            duplicate = self.store._one("SELECT id FROM referral_leads WHERE phone_normalized=? AND status<>'draft'", (phone_normalized,))
-            if duplicate:
+            lead_id = int(data.get("lead_id") or 0)
+            if not lead_id:
+                lead_id = self._ensure_collecting_lead(platform, user_id, data) or 0
+            if not lead_id:
                 self._clear_session(platform, user_id)
                 transport.send(user_id, "Этот клиент уже зарегистрирован в партнёрской программе. Повторная заявка не создана.", inline=self.menu())
                 return True
             with self.store.db:
                 self.store.db.execute(
-                    "INSERT OR IGNORE INTO referral_leads(submission_key,agent_platform,agent_user_id,source,platform,client_name,phone,phone_normalized,relation_to_agent,source_permission,agent_payout_phone,status,created_at,submitted_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,'submitted',?,?,?)",
-                    (data["submission_key"], platform, user_id, "agent_form", platform, data["client_name"], data["phone"], phone_normalized, data["relation_to_agent"], data["source_permission"], payout, now, now, now),
+                    "UPDATE referral_leads SET relation_to_agent=?,source_permission=?,agent_payout_phone=?,status='submitted',submitted_at=COALESCE(submitted_at,?),updated_at=? WHERE id=?",
+                    (data.get("relation_to_agent"), data.get("source_permission"), payout, now, now, lead_id),
                 )
-                lead = self.store._one("SELECT id FROM referral_leads WHERE submission_key=?", (data["submission_key"],))
                 self.store.db.execute("UPDATE agent_profiles SET phone=?,updated_at=? WHERE platform=? AND user_id=?", (payout, now, platform, user_id))
-            assert lead
-            self.mailings.disable(platform, user_id, "client_transferred")
-            self.executor.submit(self._sync_lead, int(lead["id"]))
-            self.executor.submit(self._notify_new_lead, platform, int(lead["id"]), user_id, data["client_name"], data["phone"])
-            data["lead_id"] = int(lead["id"])
+            self.executor.submit(self._sync_lead, lead_id)
+            self.executor.submit(self._sync_followup, lead_id, "agent_payout_phone", "Телефон агента для выплаты")
+            self.executor.submit(self._notify_new_lead, platform, lead_id, user_id, data["client_name"], data["phone"])
+            data["lead_id"] = lead_id
             self._set_session(platform, user_id, "client_warning", data)
             transport.send(user_id, "Получится предупредить знакомого, что ему позвонит менеджер А7 Консалт?", inline=[[button("Да", "agent:warn:yes"), button("Нет", "agent:warn:no")]])
             return True

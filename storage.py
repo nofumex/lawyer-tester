@@ -95,6 +95,11 @@ class Storage:
             cancelled_at INTEGER,uncertain_at INTEGER,error_message TEXT,backfill_batch_id INTEGER,
             created_at INTEGER NOT NULL,UNIQUE(platform,user_id,step));
         CREATE INDEX IF NOT EXISTS idx_mailing_jobs_due ON mailing_jobs(status,due_at,id);
+        CREATE TABLE IF NOT EXISTS mailing_crm_notes(
+            id INTEGER PRIMARY KEY,job_id INTEGER NOT NULL UNIQUE REFERENCES mailing_jobs(id),
+            note_text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,
+            lease_until INTEGER,completed_at INTEGER,error_message TEXT,created_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_mailing_crm_notes_retry ON mailing_crm_notes(status,lease_until,id);
         CREATE TABLE IF NOT EXISTS mailing_test_users(
             platform TEXT NOT NULL,user_id TEXT NOT NULL,created_at INTEGER NOT NULL,
             PRIMARY KEY(platform,user_id));

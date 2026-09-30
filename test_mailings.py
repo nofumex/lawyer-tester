@@ -19,6 +19,19 @@ class FakeTransport:
             raise TimeoutError("ambiguous")
 
 
+class NoteCRM:
+    def __init__(self, fail_once=False):
+        self.fail_once=fail_once
+        self.notes=[]
+    def has_note(self,lead_id,marker):
+        return any(item[0]==lead_id and marker in item[1] for item in self.notes)
+    def add_note(self,lead_id,text):
+        if self.fail_once:
+            self.fail_once=False
+            raise RuntimeError('temporary CRM error')
+        self.notes.append((lead_id,text))
+
+
 class MailingTests(unittest.TestCase):
     def setUp(self):
         file = tempfile.NamedTemporaryFile(delete=False)
@@ -73,6 +86,31 @@ class MailingTests(unittest.TestCase):
         sent = self.store._one("SELECT * FROM mailing_jobs WHERE step=1")
         self.assertEqual(second["due_at"], due_for_step(2, 2, sent["sent_at"]))
         self.assertEqual(len(self.transport.sent), 1)
+
+    def test_sent_message_creates_readable_idempotent_crm_note_with_retry(self):
+        self.user()
+        test=self.store.enabled_test()
+        with self.store.db:
+            self.store.db.execute("INSERT INTO attempts(user_platform,user_id,test_id,started_at,last_activity_at,status,amo_lead_id) VALUES('telegram','1',?,?,?,'active',77)",(test['id'],self.now,self.now))
+        crm=NoteCRM(fail_once=True)
+        service=MailingService(self.store,{"telegram":self.transport},1,crm)
+        service.reconcile_all()
+        job=self.store._one("SELECT * FROM mailing_jobs WHERE step=1")
+        with self.store.db:
+            self.store.db.execute("UPDATE mailing_jobs SET due_at=? WHERE id=?",(self.now,job['id']))
+            self.store.db.execute("INSERT INTO mailing_test_users VALUES('telegram','1',?)",(self.now,))
+        self.assertTrue(service.deliver_job(job['id']))
+        outbox=self.store._one("SELECT * FROM mailing_crm_notes")
+        self.assertIn("Канал: Telegram",outbox['note_text'])
+        self.assertIn("Группа: 2",outbox['note_text'])
+        self.assertIn("Номер сообщения: 1",outbox['note_text'])
+        self.assertIn(message_for(2,1),outbox['note_text'])
+        self.assertFalse(service.sync_crm_note(outbox['id']))
+        self.assertEqual(self.store._one("SELECT status FROM mailing_crm_notes")['status'],'pending')
+        self.assertTrue(service.sync_crm_note(outbox['id']))
+        self.assertEqual(self.store._one("SELECT status FROM mailing_crm_notes")['status'],'done')
+        self.assertFalse(service.sync_crm_note(outbox['id']))
+        self.assertEqual(len(crm.notes),1)
 
     def test_group1_uses_completion_and_exact_first_message(self):
         self.user(created_at=self.now - 300 * DAY)

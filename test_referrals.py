@@ -54,7 +54,11 @@ class ReferralTests(unittest.TestCase):
 
     def test_full_new_client_form_is_idempotent_and_stops_ads(self):
         self.program.handle_callback(self.transport,'telegram','1','agent:new_client')
-        for value in ('Иван','8 999 111-22-33','знакомый','да','8 999 222-33-44'):
+        self.assertTrue(self.program.handle_text(self.transport,'telegram','1','Иван'))
+        self.assertTrue(self.program.handle_text(self.transport,'telegram','1','8 999 111-22-33'))
+        early=self.store._one("SELECT * FROM referral_leads")
+        self.assertEqual((early['client_name'],early['phone'],early['status']),('Иван','+79991112233','collecting'))
+        for value in ('знакомый','да','8 999 222-33-44'):
             self.assertTrue(self.program.handle_text(self.transport,'telegram','1',value))
         self.program.handle_callback(self.transport,'telegram','1','agent:warn:yes')
         self.program.handle_callback(self.transport,'telegram','1','agent:call:no')
@@ -65,6 +69,33 @@ class ReferralTests(unittest.TestCase):
         for value in ('Иван снова','8 999 111-22-33','знакомый','да','8 999 222-33-44'):
             self.program.handle_text(self.transport,'telegram','1',value)
         self.assertEqual(self.store._one("SELECT count(*) n FROM referral_leads")['n'],1)
+
+    def test_referral_link_button_is_absent_from_all_menus(self):
+        for menu in (self.program.menu(),self.program.profile_menu(),self.program.main_menu()):
+            labels=[item['text'] for row in menu for item in row]
+            self.assertNotIn('Реферальная ссылка',labels)
+
+    def test_amocrm_deal_is_created_after_name_and_phone_then_supplemented(self):
+        crm=FakeCRM();program=AgentProgram(self.store,self.config,crm,self.mailings,self.transports)
+        try:
+            program.handle_callback(self.transport,'telegram','1','agent:new_client')
+            program.handle_text(self.transport,'telegram','1','Ранний клиент')
+            program.handle_text(self.transport,'telegram','1','8 999 444-55-66')
+            self.assertEqual(self.store._one("SELECT status FROM referral_leads WHERE phone='+79994445566'")['status'],'collecting')
+            program.handle_text(self.transport,'telegram','1','коллега')
+            program.handle_text(self.transport,'telegram','1','можно')
+            program.handle_text(self.transport,'telegram','1','8 999 777-88-99')
+            program.handle_callback(self.transport,'telegram','1','agent:warn:no')
+            program.executor.shutdown(wait=True)
+            lead=self.store._one("SELECT * FROM referral_leads WHERE phone='+79994445566'")
+            self.assertEqual(lead['amo_lead_id'],501)
+            self.assertEqual(len(crm.created),1)
+            notes='\n'.join(text for _,text in crm.notes)
+            self.assertIn('Связь клиента с агентом: коллега',notes)
+            self.assertIn('Можно сообщить источник контакта: можно',notes)
+        finally:
+            # executor is already stopped above; shutdown remains idempotent.
+            program.close()
 
     def test_referral_link_and_two_levels_are_deduplicated(self):
         self.program.join('telegram','1','self')
