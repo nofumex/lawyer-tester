@@ -112,7 +112,7 @@ class AgentProgram:
             if claim.rowcount != 1:
                 continue
             try:
-                transport.send(manager_id, text)
+                transport.send(manager_id, text, preserve=True)
             except Exception:
                 with self.store.db:
                     self.store.db.execute(
@@ -444,7 +444,7 @@ class AgentProgram:
             current = self._session(platform, user_id)
             submission_key = secrets.token_urlsafe(16)
             self._set_session(platform, user_id, "client_name", {"submission_key": submission_key})
-            transport.send(user_id, "<b>Новый клиент</b>\n\nВведите имя клиента.")
+            transport.send(user_id, "<b>Новый клиент</b>\n\nВведите имя клиента.", preserve=True)
             return True
         if data in {"agent:warn:yes", "agent:warn:no", "agent:call:yes", "agent:call:no"}:
             return self._followup_callback(transport, platform, user_id, data)
@@ -491,16 +491,16 @@ class AgentProgram:
         clean = text.strip()
         if state == "client_name":
             if not clean:
-                transport.send(user_id, "Имя не должно быть пустым.")
+                transport.send(user_id, "Имя не должно быть пустым.", preserve=True)
                 return True
             data["client_name"] = clean[:255]
             self._set_session(platform, user_id, "client_phone", data)
-            transport.send(user_id, "Введите телефон клиента.")
+            transport.send(user_id, "Введите телефон клиента.", preserve=True)
             return True
         if state == "client_phone":
             phone = normalize_phone(clean)
             if not phone:
-                transport.send(user_id, "Телефон выглядит некорректно. Введите номер ещё раз.")
+                transport.send(user_id, "Телефон выглядит некорректно. Введите номер ещё раз.", preserve=True)
                 return True
             data["phone"] = phone
             lead_id = self._ensure_collecting_lead(platform, user_id, data)
@@ -513,7 +513,7 @@ class AgentProgram:
             self.executor.submit(self._sync_lead, lead_id)
             self.executor.submit(self._notify_new_lead, platform, lead_id, user_id, data["client_name"], data["phone"])
             self._set_session(platform, user_id, "client_relation", data)
-            transport.send(user_id, "Кем клиент вам приходится? Может ли он на вас сослаться?")
+            transport.send(user_id, "Кем клиент вам приходится? Может ли он на вас сослаться?", preserve=True)
             return True
         if state == "client_relation":
             lead_id = int(data.get("lead_id") or self._ensure_collecting_lead(platform, user_id, data) or 0)
@@ -528,7 +528,7 @@ class AgentProgram:
             self.executor.submit(self._sync_lead, lead_id)
             self.executor.submit(self._sync_followup, lead_id, "relation_to_agent", "Связь клиента с агентом")
             self._set_session(platform, user_id, "client_permission", data)
-            transport.send(user_id, "Можно ли сообщить, что номер получили от вас?")
+            transport.send(user_id, "Можно ли сообщить, что номер получили от вас?", preserve=True)
             return True
         if state == "client_permission":
             lead_id = int(data.get("lead_id") or self._ensure_collecting_lead(platform, user_id, data) or 0)
@@ -543,12 +543,12 @@ class AgentProgram:
             self.executor.submit(self._sync_lead, lead_id)
             self.executor.submit(self._sync_followup, lead_id, "source_permission", "Можно сообщить источник контакта")
             self._set_session(platform, user_id, "client_payout", data)
-            transport.send(user_id, "По какому номеру с вами связываться для выплаты бонуса?")
+            transport.send(user_id, "По какому номеру с вами связываться для выплаты бонуса?", preserve=True)
             return True
         if state == "client_payout":
             payout = normalize_phone(clean)
             if not payout:
-                transport.send(user_id, "Телефон выглядит некорректно. Введите номер ещё раз.")
+                transport.send(user_id, "Телефон выглядит некорректно. Введите номер ещё раз.", preserve=True)
                 return True
             now = int(time.time())
             lead_id = int(data.get("lead_id") or 0)
@@ -568,7 +568,7 @@ class AgentProgram:
             self.executor.submit(self._sync_followup, lead_id, "agent_payout_phone", "Телефон агента для выплаты")
             data["lead_id"] = lead_id
             self._set_session(platform, user_id, "client_warning", data)
-            transport.send(user_id, "Получится предупредить знакомого, что ему позвонит менеджер А7 Консалт?", inline=[[button("Да", "agent:warn:yes"), button("Нет", "agent:warn:no")]])
+            transport.send(user_id, "Получится предупредить знакомого, что ему позвонит менеджер А7 Консалт?", inline=[[button("Да", "agent:warn:yes"), button("Нет", "agent:warn:no")]], preserve=True)
             return True
         if state == "manager_message":
             now = int(time.time())

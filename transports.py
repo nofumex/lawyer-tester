@@ -40,7 +40,7 @@ def _open_with_retry(request: Request, timeout: int = 35) -> Any:
 class Transport(Protocol):
     platform: str
     def updates(self, offset: int | str | None, timeout: int) -> list[dict[str,Any]]: ...
-    def send(self, user_id:str, text:str, *, keyboard:list[list[str]]|None=None, remove_keyboard:bool=False, inline:list[list[dict[str,str]]]|None=None) -> None: ...
+    def send(self, user_id:str, text:str, *, keyboard:list[list[str]]|None=None, remove_keyboard:bool=False, inline:list[list[dict[str,str]]]|None=None, preserve:bool=False) -> None: ...
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None: ...
     def answer_callback(self,callback_id:str,text:str='',*,inline:list[list[dict[str,str]]]|None=None) -> None: ...
     def edit(self,user_id:str,message_id:str,text:str,inline:list[list[dict[str,str]]]) -> None: ...
@@ -62,7 +62,7 @@ class TelegramTransport:
         body={'timeout':timeout,'allowed_updates':['message','callback_query']}
         if offset is not None: body['offset']=int(offset)
         return self._call('getUpdates',body)
-    def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:
+    def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None,preserve=False) -> None:
         markup=None
         if keyboard is not None: markup={'keyboard':keyboard,'resize_keyboard':True,'one_time_keyboard':False}
         if remove_keyboard: markup={'remove_keyboard':True}
@@ -70,10 +70,11 @@ class TelegramTransport:
         body={'chat_id':user_id,'text':text,'parse_mode':'HTML'}
         if markup: body['reply_markup']=markup
         result=self._call('sendMessage',body)
-        previous=self._last_message.get(str(user_id));current=int(result['message_id'])
-        self._last_message[str(user_id)]=current
-        if previous and previous!=current:
-            cleanup.submit(self.delete,user_id,str(previous))
+        if not preserve:
+            previous=self._last_message.get(str(user_id));current=int(result['message_id'])
+            self._last_message[str(user_id)]=current
+            if previous and previous!=current:
+                cleanup.submit(self.delete,user_id,str(previous))
     def send_broadcast(self,user_id:str,payload:dict[str,Any],buttons:list[list[dict[str,str]]]) -> None:
         markup={'inline_keyboard':buttons} if buttons else None
         kind=payload.get('kind','text'); text=payload.get('text',''); body={'chat_id':user_id,'caption' if kind!='text' else 'text':text}
@@ -115,7 +116,7 @@ class MaxTransport:
         if marker is not None: params['marker']=str(marker)
         data=self._call('/updates?'+urlencode(params,doseq=True)); self.marker=data.get('marker')
         return [self.normalize_update(x) for x in data.get('updates',[])]
-    def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None) -> None:
+    def send(self,user_id:str,text:str,*,keyboard=None,remove_keyboard=False,inline=None,preserve=False) -> None:
         body={'text':text,'format':'html'}
         attachments=[]
         if keyboard is not None:

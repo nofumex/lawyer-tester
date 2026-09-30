@@ -126,6 +126,19 @@ class LatencyTests(unittest.TestCase):
         transport.send('1','third')
         self.assertEqual(calls.count('sendMessage'),3)
 
+    def test_telegram_preserved_message_does_not_delete_or_replace_form_prompt(self):
+        transport=TelegramTransport('token')
+        calls=[]
+        def call(method,body):
+            calls.append((method,body))
+            return {'message_id':len(calls)}
+        transport._call=call
+        transport.send('1','existing menu')
+        transport.send('1','client form prompt',preserve=True)
+        transport.send('1','manager notification',preserve=True)
+        cleanup.queue.join()
+        self.assertEqual([method for method,_ in calls],['sendMessage','sendMessage','sendMessage'])
+
     def test_snapshot_network_does_not_block_ui_or_mark_new_answer(self):
         entered=threading.Event()
         class CRM:

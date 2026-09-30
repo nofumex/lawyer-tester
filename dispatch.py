@@ -108,7 +108,12 @@ class UpdateDispatcher:
                 with self.store.db:
                     self.store.db.execute('UPDATE update_queue SET response_index=? WHERE id=?',(index+1,row['id']))
             incoming = update.get('message') or {}
-            if incoming.get('message_id'):
+            agent_session = self.store._one(
+                "SELECT state FROM agent_sessions WHERE platform=? AND user_id=?",
+                (self.transport.platform, user),
+            )
+            preserving_client_form = bool(agent_session and str(agent_session['state']).startswith('client_'))
+            if incoming.get('message_id') and not preserving_client_form:
                 cleanup.submit(self.transport.delete,
                                str(incoming.get('chat',{}).get('id') or user),str(incoming['message_id']))
             with self.store.db:
