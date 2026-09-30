@@ -16,6 +16,8 @@ from engine import SurveyEngine
 from seed import seed_default_test
 from storage import Storage
 from transports import MaxTransport, TelegramTransport, Transport
+from mailings import MailingService
+from referrals import AgentProgram
 
 
 def _finish_broadcast(admin:Admin, source_platform:str, user_id:str, transports:dict[str,Transport], reply_transport:Transport) -> None:
@@ -43,10 +45,23 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     user_id=str(sender.get('id') or message.get('chat',{}).get('id') or '')
     if not user_id: return
     name=' '.join(filter(None,[sender.get('first_name'),sender.get('last_name')])) or sender.get('username')
+    engine.store.touch_user(transport.platform,user_id,name)
     callback=(update.get('callback_query') or {}).get('data')
     callback_query=update.get('callback_query') or {}
     text=(update.get('message') or {}).get('text','').strip()
     is_admin=user_id in config.admin_ids
+    agent=getattr(engine,'agent_program',None)
+    mailings=getattr(engine,'mailing_service',None)
+    if callback=='user:test':
+        if callback_query.get('id'): answer_callback_best_effort(transport,str(callback_query['id']))
+        greeting,prompt=engine.begin(transport.platform,user_id,name)
+        if prompt: transport.send(user_id,f"<b>{escape(greeting)}</b>\n\n{prompt.text}",keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
+        else: transport.send(user_id,greeting)
+        return
+    if callback and agent and (callback.startswith('mail:') or callback.startswith('agent:') or callback.startswith('profile:') or callback.startswith('chat:') or callback=='user:main'):
+        handled=agent.handle_callback(transport,transport.platform,user_id,callback)
+        if handled and callback_query.get('id'): answer_callback_best_effort(transport,str(callback_query['id']))
+        if handled:return
     if callback and (callback.startswith('survey:') or callback.startswith('review:')):
         reply,prompt,edit=engine.receive_callback(transport.platform,user_id,callback)
         max_callback_edit=transport.platform=='max' and prompt is not None and edit and prompt.inline is not None
@@ -93,9 +108,18 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
             reply,keyboard=admin.menu(); transport.send(user_id,reply,inline=keyboard)
         else: transport.send(user_id,'Недостаточно прав.')
         return
-    if text=='/start':
+    if text.startswith('/mailings'):
+        if not is_admin: transport.send(user_id,'Недостаточно прав.');return
+        transport.send(user_id,mailings.admin_command(transport.platform,user_id,text) if mailings else 'Сервис рассылок недоступен.')
+        return
+    if is_admin and agent and (text.startswith('/bonus ') or text.startswith('/bonus_paid ') or text.startswith('/reply ')):
+        result=agent.admin_command(transport,transport.platform,user_id,text)
+        if result:transport.send(user_id,result)
+        return
+    if text.startswith('/start'):
         if is_admin: admin.s.clear_draft(transport.platform,user_id)
         greeting,prompt=engine.begin(transport.platform,user_id,name)
+        if agent: agent.start_payload(transport.platform,user_id,text)
         if prompt:
             first_attempt = greeting != 'Продолжаем незавершённое тестирование.'
             message = f"<b>{escape(greeting)}</b>\n\n{prompt.text}" if first_attempt else f"Продолжаем незавершённое тестирование.\n\n{prompt.text}"
@@ -104,6 +128,8 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         return
     if is_admin and (result:=admin.text(transport.platform,user_id,text)):
         reply,keyboard=result; transport.send(user_id,reply,inline=keyboard); return
+    if agent and agent.handle_text(transport,transport.platform,user_id,text):
+        return
     reply,prompt=engine.receive(transport.platform,user_id,text)
     if prompt:
         transport.send(user_id,prompt.text,keyboard=prompt.keyboard,remove_keyboard=prompt.remove_keyboard,inline=prompt.inline)
@@ -167,6 +193,10 @@ def main() -> int:
         transports.append(MaxTransport(config.max_token,config.max_api_base_url,marker=store.poll_cursor('max')))
     if not transports: raise SystemExit('Configure TELEGRAM_BOT_TOKEN or MAX_BOT_TOKEN + MAX_API_BASE_URL')
     transports_by_platform={transport.platform:transport for transport in transports}
+    mailings=MailingService(store,transports_by_platform,config.mailing_interval_seconds)
+    agent_program=AgentProgram(store,config,crm,mailings,transports_by_platform)
+    engine.mailing_service=mailings
+    engine.agent_program=agent_program
     processing_lock=threading.RLock(); stop_event=threading.Event()
     def request_stop(signum: int, frame: object) -> None:
         logging.info('Received signal %s; stopping polling',signum); stop_event.set()
@@ -176,11 +206,15 @@ def main() -> int:
         args=(transport,engine,admin,config,processing_lock,index == 0,stop_event,transports_by_platform),
         name=f'{transport.platform}-polling',
     ) for index,transport in enumerate(transports)]
+    mailing_worker=threading.Thread(target=mailings.run,args=(stop_event,),name='automatic-mailings',daemon=True)
+    referral_worker=threading.Thread(target=agent_program.run,args=(stop_event,),name='referral-retry',daemon=True)
+    mailing_worker.start()
+    referral_worker.start()
     for worker in workers: worker.start()
     try:
         for worker in workers: worker.join()
     finally:
-        stop_event.set(); engine.shutdown(); store.close()
+        stop_event.set(); mailing_worker.join(); referral_worker.join(); agent_program.close(); engine.shutdown(); store.close()
     return 0
 
 if __name__=='__main__': raise SystemExit(main())

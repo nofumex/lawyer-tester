@@ -33,6 +33,15 @@ class Config:
     target_status: str
     inactivity_seconds: int
     poll_timeout: int
+    telegram_bot_username: str = ""
+    max_bot_link: str = ""
+    a7_offer_url: str = ""
+    manager_contact_url: str = ""
+    default_bonus_per_client: int = 10000
+    second_level_bonus: int = 5000
+    referral_pipeline: str = "[A7] TG / Max - Боты"
+    referral_status: str = ""
+    mailing_interval_seconds: int = 30
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -50,4 +59,13 @@ class Config:
             target_status=os.getenv("AMOCRM_TARGET_STATUS_NAME", "Готов к сотрудничеству"),
             inactivity_seconds=int(os.getenv("INACTIVITY_MINUTES", "30")) * 60,
             poll_timeout=int(os.getenv("POLL_TIMEOUT_SECONDS", "25")),
+            telegram_bot_username=os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@"),
+            max_bot_link=os.getenv("MAX_BOT_LINK", "").strip(),
+            a7_offer_url=os.getenv("A7_OFFER_URL", "").strip(),
+            manager_contact_url=os.getenv("A7_MANAGER_CONTACT_URL", "").strip(),
+            default_bonus_per_client=int(os.getenv("DEFAULT_BONUS_PER_CLIENT", "10000")),
+            second_level_bonus=int(os.getenv("SECOND_LEVEL_BONUS", "5000")),
+            referral_pipeline=os.getenv("AMOCRM_REFERRAL_PIPELINE_NAME", "[A7] TG / Max - Боты").strip(),
+            referral_status=os.getenv("AMOCRM_REFERRAL_STATUS_NAME", "").strip(),
+            mailing_interval_seconds=max(1,int(os.getenv("MAILING_WORKER_INTERVAL_SECONDS", "30"))),
         )

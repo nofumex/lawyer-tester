@@ -172,7 +172,10 @@ class MaxTransport:
         typ=update.get('update_type'); user=update.get('user') or {}; uid=str(user.get('user_id') or user.get('id') or '')
         msg=update.get('message') or {}; cb=update.get('callback') or {}
         event_id=str(update.get('update_id') or update.get('id') or cb.get('callback_id') or msg.get('body',{}).get('mid') or msg.get('message_id') or f'{typ}:{update.get("timestamp", "")}:{uid}')
-        if typ=='bot_started': return {'update_id':update.get('marker',update.get('timestamp',0)),'_event_id':event_id,'message':{'from':{'id':uid,'first_name':user.get('name','')},'chat':{'id':update.get('chat_id',uid)},'text':'/start'}}
+        if typ=='bot_started':
+            start_payload=update.get('payload') or update.get('start_payload') or update.get('start_param') or ''
+            start_text='/start'+((' '+str(start_payload)) if start_payload else '')
+            return {'update_id':update.get('marker',update.get('timestamp',0)),'_event_id':event_id,'message':{'from':{'id':uid,'first_name':user.get('name','')},'chat':{'id':update.get('chat_id',uid)},'text':start_text}}
         if typ=='message_created':
             msg=update.get('message') or {}; sender=msg.get('sender') or user
             return {'update_id':update.get('marker',update.get('timestamp',0)),'_event_id':event_id,'message':{'message_id':msg.get('body',{}).get('mid',msg.get('message_id','')),'from':{'id':str(sender.get('user_id') or sender.get('id') or uid),'first_name':sender.get('name','')},'chat':{'id':msg.get('chat_id',update.get('chat_id',uid))},'text':msg.get('body',{}).get('text',msg.get('text',''))}}

@@ -112,6 +112,46 @@ class AmoClient:
         lead=self.request('POST','/api/v4/leads',body=[{'name':full_name,'pipeline_id':pipeline,'status_id':status,'_embedded':{'contacts':[{'id':cid}]}}])
         return int(lead['_embedded']['leads'][0]['id'])
 
+    def first_pipeline_status(self, pipeline_id: int) -> int:
+        data=self.request('GET',f'/api/v4/leads/pipelines/{pipeline_id}') or {}
+        statuses=data.get('_embedded',{}).get('statuses',[])
+        regular=[x for x in statuses if int(x.get('type') or 0)==0]
+        chosen=(regular or statuses)
+        if not chosen: raise AmoError(f'No statuses in pipeline {pipeline_id}')
+        return int(chosen[0]['id'])
+
+    def find_referral_lead(self, phone: str, pipeline_name: str) -> int | None:
+        pipeline_id,_ = self.target_pipeline(pipeline_name)
+        normal_phone=self._phone(phone)
+        if not normal_phone:return None
+        matches=self._matching_leads(normal_phone,lambda c:normal_phone in self._contact_phones(c),pipeline_id)
+        if len(matches)==1:return next(iter(matches))
+        if len(matches)>1:LOG.warning('Ambiguous referral phone match (%d leads); not binding',len(matches))
+        return None
+
+    def target_pipeline(self, pipeline_name: str) -> tuple[int, dict[str, int]]:
+        data=self.request('GET','/api/v4/leads/pipelines') or {}
+        for pipeline in data.get('_embedded',{}).get('pipelines',[]):
+            if str(pipeline.get('name','')).casefold()==pipeline_name.casefold():
+                return int(pipeline['id']),{str(x.get('name','')):int(x['id']) for x in pipeline.get('_embedded',{}).get('statuses',[])}
+        raise AmoError(f'Target amoCRM pipeline not found: {pipeline_name}')
+
+    def create_referral_lead(self, *, client_name: str, phone: str, pipeline_name: str,
+                             status_name: str = '', note: str = '') -> tuple[int, int]:
+        pipeline_id,statuses=self.target_pipeline(pipeline_name)
+        if status_name:
+            matches=[value for name,value in statuses.items() if name.casefold()==status_name.casefold()]
+            if not matches:raise AmoError(f'Target amoCRM stage not found: {pipeline_name} / {status_name}')
+            status_id=matches[0]
+        else:
+            status_id=self.first_pipeline_status(pipeline_id)
+        contact=self.request('POST','/api/v4/contacts',body=[{'name':client_name,'custom_fields_values':[{'field_code':'PHONE','values':[{'value':phone}]}]}])
+        contact_id=int(contact['_embedded']['contacts'][0]['id'])
+        lead=self.request('POST','/api/v4/leads',body=[{'name':f'Клиент от агента А7: {client_name}','pipeline_id':pipeline_id,'status_id':status_id,'_embedded':{'contacts':[{'id':contact_id}]}}])
+        lead_id=int(lead['_embedded']['leads'][0]['id'])
+        if note:self.add_note(lead_id,note)
+        return lead_id,contact_id
+
     @staticmethod
     def _phone(value: str) -> str:
         digits = re.sub(r"\D", "", value)

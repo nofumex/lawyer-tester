@@ -94,6 +94,10 @@ class MaxTransportTests(unittest.TestCase):
         self.assertEqual(updates[0]['callback_query']['from']['id'], '7')
         self.assertEqual(updates[0]['callback_query']['message']['message_id'], 'mid')
 
+    def test_bot_started_preserves_referral_payload(self):
+        update=MaxTransport.normalize_update({'update_type':'bot_started','timestamp':1,'payload':'ref_max_42','user':{'user_id':7,'name':'Ivan'}})
+        self.assertEqual(update['message']['text'],'/start ref_max_42')
+
     def test_restored_marker_is_used_when_no_explicit_cursor_is_passed(self):
         response={'marker':101,'updates':[]}
         requests=[]

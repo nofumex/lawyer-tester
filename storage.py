@@ -80,6 +80,57 @@ class Storage:
             response_index INTEGER NOT NULL DEFAULT 0, UNIQUE(platform,update_key));
         CREATE INDEX IF NOT EXISTS idx_update_queue_user ON update_queue(platform,user_id,id);
         CREATE TABLE IF NOT EXISTS crm_operations(operation_key TEXT PRIMARY KEY,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS app_settings(
+            key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS mailing_states(
+            platform TEXT NOT NULL,user_id TEXT NOT NULL,group_no INTEGER NOT NULL CHECK(group_no IN (1,2)),
+            anchor_at INTEGER NOT NULL,next_step INTEGER NOT NULL DEFAULT 1,last_sent_step INTEGER,
+            last_sent_at INTEGER,paused_at INTEGER,resume_at INTEGER,reminders_disabled INTEGER NOT NULL DEFAULT 0,
+            stopped_reason TEXT,overdue INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL,
+            PRIMARY KEY(platform,user_id),FOREIGN KEY(platform,user_id) REFERENCES users(platform,user_id));
+        CREATE TABLE IF NOT EXISTS mailing_jobs(
+            id INTEGER PRIMARY KEY,platform TEXT NOT NULL,user_id TEXT NOT NULL,group_no INTEGER NOT NULL,
+            step INTEGER NOT NULL,due_at INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,claimed_at INTEGER,lease_until INTEGER,sent_at INTEGER,
+            cancelled_at INTEGER,uncertain_at INTEGER,error_message TEXT,backfill_batch_id INTEGER,
+            created_at INTEGER NOT NULL,UNIQUE(platform,user_id,step));
+        CREATE INDEX IF NOT EXISTS idx_mailing_jobs_due ON mailing_jobs(status,due_at,id);
+        CREATE TABLE IF NOT EXISTS mailing_test_users(
+            platform TEXT NOT NULL,user_id TEXT NOT NULL,created_at INTEGER NOT NULL,
+            PRIMARY KEY(platform,user_id));
+        CREATE TABLE IF NOT EXISTS mailing_backfills(
+            id INTEGER PRIMARY KEY,token TEXT NOT NULL UNIQUE,group_no INTEGER,recipient_limit INTEGER NOT NULL,
+            candidate_count INTEGER NOT NULL,status TEXT NOT NULL,created_by_platform TEXT NOT NULL,
+            created_by_user_id TEXT NOT NULL,created_at INTEGER NOT NULL,confirmed_at INTEGER);
+        CREATE TABLE IF NOT EXISTS agent_profiles(
+            platform TEXT NOT NULL,user_id TEXT NOT NULL,is_agent INTEGER NOT NULL DEFAULT 0,
+            joined_at INTEGER,joined_source TEXT,phone TEXT,referrer_platform TEXT,referrer_user_id TEXT,
+            created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(platform,user_id),
+            FOREIGN KEY(platform,user_id) REFERENCES users(platform,user_id));
+        CREATE TABLE IF NOT EXISTS referrals(
+            id INTEGER PRIMARY KEY,referrer_platform TEXT NOT NULL,referrer_user_id TEXT NOT NULL,
+            referred_platform TEXT NOT NULL,referred_user_id TEXT NOT NULL,level INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,UNIQUE(referrer_platform,referrer_user_id,referred_platform,referred_user_id,level));
+        CREATE TABLE IF NOT EXISTS referral_leads(
+            id INTEGER PRIMARY KEY,submission_key TEXT NOT NULL UNIQUE,agent_platform TEXT NOT NULL,
+            agent_user_id TEXT NOT NULL,source TEXT NOT NULL,platform TEXT NOT NULL,client_name TEXT NOT NULL,
+            phone TEXT,phone_normalized TEXT,relation_to_agent TEXT,source_permission TEXT,
+            agent_payout_phone TEXT,warning_answer TEXT,call_phone_answer TEXT,status TEXT NOT NULL DEFAULT 'draft',
+            amo_lead_id INTEGER UNIQUE,amo_contact_id INTEGER,amo_sync_status TEXT,amo_sync_error TEXT,
+            created_at INTEGER NOT NULL,submitted_at INTEGER,updated_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_referral_leads_agent ON referral_leads(agent_platform,agent_user_id,status);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_referral_leads_phone ON referral_leads(phone_normalized) WHERE phone_normalized IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS bonuses(
+            id INTEGER PRIMARY KEY,agent_platform TEXT NOT NULL,agent_user_id TEXT NOT NULL,lead_id INTEGER,
+            amount INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',comment TEXT,
+            created_by TEXT,created_at INTEGER NOT NULL,paid_at INTEGER,
+            FOREIGN KEY(lead_id) REFERENCES referral_leads(id));
+        CREATE TABLE IF NOT EXISTS agent_sessions(
+            platform TEXT NOT NULL,user_id TEXT NOT NULL,state TEXT NOT NULL,data_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,PRIMARY KEY(platform,user_id));
+        CREATE TABLE IF NOT EXISTS manager_messages(
+            id INTEGER PRIMARY KEY,platform TEXT NOT NULL,user_id TEXT NOT NULL,direction TEXT NOT NULL,
+            text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'new',created_at INTEGER NOT NULL,replied_at INTEGER);
         """)
         if 'amo_created' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
             self.db.execute('ALTER TABLE attempts ADD COLUMN amo_created INTEGER NOT NULL DEFAULT 0')
@@ -93,6 +144,9 @@ class Storage:
         # A process cannot leave a live CRM request behind after a restart.  Make
         # such claims eligible for the engine's normal retry path.
         self.db.execute("UPDATE crm_operations SET state='failed',updated_at=? WHERE state='running'",(int(time.time()),))
+        now=int(time.time())
+        self.db.execute("INSERT OR IGNORE INTO app_settings(key,value,updated_at) VALUES('mailings_enabled','0',?)",(now,))
+        self.db.execute("INSERT OR IGNORE INTO app_settings(key,value,updated_at) VALUES('mailings_implemented_at',?,?)",(str(now),now))
         self.db.commit()
         self.db = _LockedConnection(self.db)
 
