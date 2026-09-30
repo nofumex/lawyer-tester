@@ -45,7 +45,7 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     user_id=str(sender.get('id') or message.get('chat',{}).get('id') or '')
     if not user_id: return
     name=' '.join(filter(None,[sender.get('first_name'),sender.get('last_name')])) or sender.get('username')
-    engine.store.touch_user(transport.platform,user_id,name)
+    engine.store.touch_user(transport.platform,user_id,name,sender.get('username'))
     callback=(update.get('callback_query') or {}).get('data')
     callback_query=update.get('callback_query') or {}
     text=(update.get('message') or {}).get('text','').strip()

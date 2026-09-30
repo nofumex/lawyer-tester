@@ -62,6 +62,9 @@ class Storage:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS users(platform TEXT NOT NULL,user_id TEXT NOT NULL,display_name TEXT,created_at INTEGER NOT NULL,last_seen_at INTEGER NOT NULL,PRIMARY KEY(platform,user_id));
+        CREATE TABLE IF NOT EXISTS user_handles(
+            platform TEXT NOT NULL,user_id TEXT NOT NULL,username TEXT NOT NULL,updated_at INTEGER NOT NULL,
+            PRIMARY KEY(platform,user_id));
         CREATE TABLE IF NOT EXISTS tests(id INTEGER PRIMARY KEY,name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS questions(id INTEGER PRIMARY KEY,test_id INTEGER NOT NULL REFERENCES tests(id) ON DELETE CASCADE,position INTEGER NOT NULL,text TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('text','single_choice','multi_choice')),required INTEGER NOT NULL DEFAULT 1,identity_key TEXT,UNIQUE(test_id,position));
         CREATE TABLE IF NOT EXISTS options(id INTEGER PRIMARY KEY,question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,position INTEGER NOT NULL,text TEXT NOT NULL,action_json TEXT,UNIQUE(question_id,position));
@@ -125,6 +128,9 @@ class Storage:
             created_at INTEGER NOT NULL,submitted_at INTEGER,updated_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_referral_leads_agent ON referral_leads(agent_platform,agent_user_id,status);
         CREATE UNIQUE INDEX IF NOT EXISTS uq_referral_leads_phone ON referral_leads(phone_normalized) WHERE phone_normalized IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS manager_lead_notifications(
+            lead_id INTEGER NOT NULL,manager_id TEXT NOT NULL,claimed_at INTEGER NOT NULL,sent_at INTEGER,
+            PRIMARY KEY(lead_id,manager_id));
         CREATE TABLE IF NOT EXISTS bonuses(
             id INTEGER PRIMARY KEY,agent_platform TEXT NOT NULL,agent_user_id TEXT NOT NULL,lead_id INTEGER,
             amount INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',comment TEXT,
@@ -205,8 +211,16 @@ class Storage:
         with self.db:self.db.execute("UPDATE crm_operations SET state='failed',updated_at=? WHERE operation_key=?",(int(time.time()),operation_key))
     def close(self) -> None:
         self.db.close()
-    def touch_user(self, platform: str, user_id: str, name: str | None) -> None:
-        now=int(time.time()); self.db.execute("INSERT INTO users VALUES(?,?,?,?,?) ON CONFLICT(platform,user_id) DO UPDATE SET display_name=excluded.display_name,last_seen_at=excluded.last_seen_at",(platform,user_id,name,now,now)); self.db.commit()
+    def touch_user(self, platform: str, user_id: str, name: str | None, username: str | None = None) -> None:
+        now=int(time.time())
+        with self.db:
+            self.db.execute("INSERT INTO users VALUES(?,?,?,?,?) ON CONFLICT(platform,user_id) DO UPDATE SET display_name=excluded.display_name,last_seen_at=excluded.last_seen_at",(platform,user_id,name,now,now))
+            if username:
+                self.db.execute(
+                    "INSERT INTO user_handles(platform,user_id,username,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(platform,user_id) DO UPDATE SET username=excluded.username,updated_at=excluded.updated_at",
+                    (platform,user_id,username.lstrip('@'),now),
+                )
     def enabled_test(self) -> sqlite3.Row | None: return self._one("SELECT * FROM tests WHERE enabled=1 ORDER BY id LIMIT 1")
     def test_questions(self, test_id: int) -> list[sqlite3.Row]: return self.db.execute("SELECT * FROM questions WHERE test_id=? ORDER BY position,id",(test_id,)).fetchall()
     def options(self, question_id: int) -> list[sqlite3.Row]: return self.db.execute("SELECT * FROM options WHERE question_id=? ORDER BY position,id",(question_id,)).fetchall()

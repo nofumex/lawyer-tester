@@ -79,6 +79,7 @@ class ReferralTests(unittest.TestCase):
     def test_amocrm_deal_is_created_after_name_and_phone_then_supplemented(self):
         crm=FakeCRM();program=AgentProgram(self.store,self.config,crm,self.mailings,self.transports)
         try:
+            self.store.touch_user('telegram','1','Иван Юрист','ivan_lawyer')
             program.handle_callback(self.transport,'telegram','1','agent:new_client')
             program.handle_text(self.transport,'telegram','1','Ранний клиент')
             program.handle_text(self.transport,'telegram','1','8 999 444-55-66')
@@ -91,6 +92,9 @@ class ReferralTests(unittest.TestCase):
             lead=self.store._one("SELECT * FROM referral_leads WHERE phone='+79994445566'")
             self.assertEqual(lead['amo_lead_id'],501)
             self.assertEqual(len(crm.created),1)
+            self.assertIn('Юрист: Иван Юрист',crm.created[0]['note'])
+            self.assertIn('Username юриста: @ivan_lawyer',crm.created[0]['note'])
+            self.assertNotIn('telegram/1',crm.created[0]['note'])
             notes='\n'.join(text for _,text in crm.notes)
             self.assertIn('Связь клиента с агентом: коллега',notes)
             self.assertIn('Можно сообщить источник контакта: можно',notes)
@@ -142,15 +146,33 @@ class ReferralTests(unittest.TestCase):
     def test_new_client_notification_always_goes_to_telegram_managers(self):
         max_transport=FakeTransport()
         program=AgentProgram(self.store,self.config,None,self.mailings,{'telegram':self.transport,'max':max_transport})
+        restarted=None
         try:
             program._notify_new_lead('max',42,'max-agent','Иван','+79991112233')
+            program._notify_new_lead('max',42,'max-agent','Иван','+79991112233')
+            program.close()
+            restarted=AgentProgram(self.store,self.config,None,self.mailings,{'telegram':self.transport,'max':max_transport})
+            restarted._notify_new_lead('max',42,'max-agent','Иван','+79991112233')
             self.assertEqual({message[0] for message in self.transport.sent},{'88','89'})
+            self.assertEqual(len(self.transport.sent),2)
             self.assertEqual(max_transport.sent,[])
             for _,text,_ in self.transport.sent:
                 self.assertIn('<b>Новый клиент от юриста</b>',text)
                 self.assertIn('<b>MAX ID:</b>',text)
         finally:
             program.close()
+            if restarted:
+                restarted.close()
+
+    def test_notification_is_sent_immediately_after_client_phone(self):
+        self.program.handle_callback(self.transport,'telegram','1','agent:new_client')
+        self.program.handle_text(self.transport,'telegram','1','Ранний клиент')
+        self.program.handle_text(self.transport,'telegram','1','8 999 555-44-33')
+        self.program.executor.shutdown(wait=True)
+        manager_messages=[message for message in self.transport.sent if message[0] in {'88','89'}]
+        self.assertEqual(len(manager_messages),2)
+        self.assertTrue(all('<b>Новый клиент от юриста</b>' in message[1] for message in manager_messages))
+        self.assertEqual(self.program._session('telegram','1')[0],'client_relation')
 
 
 if __name__ == '__main__': unittest.main()

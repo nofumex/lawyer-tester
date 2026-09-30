@@ -79,7 +79,8 @@ class AgentProgram:
             LOG.warning("Cannot notify managers about lead %s: Telegram transport is unavailable", lead_id)
             return
         agent = self.store._one(
-            "SELECT display_name FROM users WHERE platform=? AND user_id=?",
+            "SELECT u.display_name,h.username FROM users u LEFT JOIN user_handles h "
+            "ON h.platform=u.platform AND h.user_id=u.user_id WHERE u.platform=? AND u.user_id=?",
             (platform, agent_user_id),
         )
         lead = self.store._one("SELECT * FROM referral_leads WHERE id=?", (lead_id,))
@@ -101,7 +102,30 @@ class AgentProgram:
             f"<b>{platform_name} ID:</b> <code>{escape(agent_user_id)}</code>"
         )
         for manager_id in self.config.manager_ids:
-            self._safe_send(transport, str(manager_id), text)
+            manager_id = str(manager_id)
+            now = int(time.time())
+            with self.store.db:
+                claim = self.store.db.execute(
+                    "INSERT OR IGNORE INTO manager_lead_notifications(lead_id,manager_id,claimed_at) VALUES(?,?,?)",
+                    (lead_id, manager_id, now),
+                )
+            if claim.rowcount != 1:
+                continue
+            try:
+                transport.send(manager_id, text)
+            except Exception:
+                with self.store.db:
+                    self.store.db.execute(
+                        "DELETE FROM manager_lead_notifications WHERE lead_id=? AND manager_id=? AND sent_at IS NULL",
+                        (lead_id, manager_id),
+                    )
+                LOG.exception("Deferred partner-program notification failed user_id=%s", manager_id)
+            else:
+                with self.store.db:
+                    self.store.db.execute(
+                        "UPDATE manager_lead_notifications SET sent_at=? WHERE lead_id=? AND manager_id=?",
+                        (int(time.time()), lead_id, manager_id),
+                    )
 
     def _session(self, platform: str, user_id: str) -> tuple[str, dict[str, Any]] | None:
         row = self.store._one("SELECT state,data_json FROM agent_sessions WHERE platform=? AND user_id=?", (platform, user_id))
@@ -269,10 +293,20 @@ class AgentProgram:
         if not self.store.claim_crm_operation(key):
             return
         marker = f"\u2063lawyer-tester:{key}"
+        agent = self.store._one(
+            "SELECT u.display_name,h.username FROM users u LEFT JOIN user_handles h "
+            "ON h.platform=u.platform AND h.user_id=u.user_id WHERE u.platform=? AND u.user_id=?",
+            (str(lead["agent_platform"]), str(lead["agent_user_id"])),
+        )
+        agent_name = str(agent["display_name"] or "Не указано") if agent else "Не указано"
+        agent_username = f"@{agent['username']}" if agent and agent["username"] else "не указан"
+        platform_name = "MAX" if lead["agent_platform"] == "max" else "Telegram"
         note = (
             "Заявка партнёрской программы А7 Консалт\n"
-            f"Агент: {lead['agent_platform']}/{lead['agent_user_id']}\n"
-            f"Источник: {lead['source']}\nПлатформа: {lead['platform']}\n"
+            f"Юрист: {agent_name}\n"
+            f"Username юриста: {agent_username}\n"
+            f"Платформа юриста: {platform_name}\n"
+            "Источник заявки: форма «+ Новый клиент»\n"
             f"Связь с агентом: {lead['relation_to_agent'] or 'не указана'}\n"
             f"Можно назвать источник: {lead['source_permission'] or 'не указано'}\n"
             f"Телефон агента для выплаты: {lead['agent_payout_phone'] or 'не указан'}{marker}"
@@ -408,7 +442,7 @@ class AgentProgram:
             if not self._profile(platform, user_id) or not self._profile(platform, user_id)["is_agent"]:
                 self.join(platform, user_id, "self")
             current = self._session(platform, user_id)
-            submission_key = current[1].get("submission_key") if current and current[0].startswith("client_") else secrets.token_urlsafe(16)
+            submission_key = secrets.token_urlsafe(16)
             self._set_session(platform, user_id, "client_name", {"submission_key": submission_key})
             transport.send(user_id, "<b>Новый клиент</b>\n\nВведите имя клиента.")
             return True
@@ -477,6 +511,7 @@ class AgentProgram:
             data["lead_id"] = lead_id
             self.mailings.disable(platform, user_id, "client_transferred")
             self.executor.submit(self._sync_lead, lead_id)
+            self.executor.submit(self._notify_new_lead, platform, lead_id, user_id, data["client_name"], data["phone"])
             self._set_session(platform, user_id, "client_relation", data)
             transport.send(user_id, "Кем клиент вам приходится? Может ли он на вас сослаться?")
             return True
@@ -531,7 +566,6 @@ class AgentProgram:
                 self.store.db.execute("UPDATE agent_profiles SET phone=?,updated_at=? WHERE platform=? AND user_id=?", (payout, now, platform, user_id))
             self.executor.submit(self._sync_lead, lead_id)
             self.executor.submit(self._sync_followup, lead_id, "agent_payout_phone", "Телефон агента для выплаты")
-            self.executor.submit(self._notify_new_lead, platform, lead_id, user_id, data["client_name"], data["phone"])
             data["lead_id"] = lead_id
             self._set_session(platform, user_id, "client_warning", data)
             transport.send(user_id, "Получится предупредить знакомого, что ему позвонит менеджер А7 Консалт?", inline=[[button("Да", "agent:warn:yes"), button("Нет", "agent:warn:no")]])
