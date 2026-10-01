@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 import time
 from html import escape
 
@@ -39,11 +40,11 @@ class ChatService:
         self.store, self.config, self.crm, self.transports = store, config, crm, transports
 
     def is_manager(self, platform, user_id):
-        return platform == 'telegram' and user_id in self.config.manager_ids
+        return user_id in self.config.admin_ids or (platform == 'telegram' and user_id in self.config.manager_ids)
 
     def active(self, platform, user_id):
         if self.is_manager(platform, user_id):
-            return self.store._one("SELECT * FROM chat_sessions WHERE manager_id=? AND status='active'", (user_id,))
+            return self.store._one("SELECT * FROM chat_sessions WHERE manager_platform=? AND manager_id=? AND status='active'", (platform, user_id))
         return self.store._one("SELECT * FROM chat_sessions WHERE platform=? AND user_id=? AND status IN ('open','active')", (platform, user_id))
 
     def customer(self, chat):
@@ -86,6 +87,59 @@ class ChatService:
             from transports import send_chat_attachments
             send_chat_attachments(self.transports, source_platform, platform, user_id, attachments, archive_only=archive_only)
 
+    def command(self, transport, platform, user_id, argument):
+        if user_id not in self.config.admin_ids:
+            transport.send(user_id, 'Недостаточно прав.', preserve=True)
+            return
+        argument = argument.strip()
+        if not argument:
+            transport.send(user_id, 'Использование: /chat ID_сделки_или_пользователя или /chat @username.\n'
+                           'Для точного поиска: /chat lead:123, /chat telegram:123, /chat max:123.', preserve=True)
+            return
+        with self.store.db:
+            explicit = re.fullmatch(r'(lead|amo|amocrm|telegram|tg|max)[:\s]+(\d+)', argument, re.IGNORECASE)
+            targets = set()
+            if explicit or argument.isdecimal():
+                kind, value = (explicit.group(1).lower(), explicit.group(2)) if explicit else ('any', argument)
+                value = str(int(value))
+                if kind in {'any', 'lead', 'amo', 'amocrm'}:
+                    targets.update((row['user_platform'], row['user_id']) for row in self.store.db.execute(
+                        'SELECT DISTINCT user_platform,user_id FROM attempts WHERE amo_lead_id=?', (value,)).fetchall())
+                if kind in {'any', 'telegram', 'tg', 'max'}:
+                    target_platform = 'telegram' if kind in {'telegram', 'tg'} else kind
+                    rows = self.store.db.execute('SELECT platform,user_id FROM users WHERE user_id=?' +
+                                                 ('' if kind == 'any' else ' AND platform=?'),
+                                                 (value,) if kind == 'any' else (value, target_platform)).fetchall()
+                    targets.update((row['platform'], row['user_id']) for row in rows)
+            elif re.fullmatch(r'@?[A-Za-z0-9_]+', argument):
+                targets.update(('telegram', row['user_id']) for row in self.store.db.execute(
+                    "SELECT user_id FROM user_handles WHERE platform='telegram' AND username=? COLLATE NOCASE",
+                    (argument.lstrip('@'),)).fetchall())
+            if not targets:
+                transport.send(user_id, 'Пользователь не найден. Он должен сначала написать боту; ID сделки и username ищутся в сохранённых данных.', preserve=True)
+                return
+            if len(targets) != 1:
+                choices = '\n'.join(f'/chat {p}:{uid}' for p, uid in sorted(targets))
+                transport.send(user_id, 'Найдено несколько пользователей. Уточните платформу:\n' + escape(choices), preserve=True)
+                return
+            target_platform, target_user = targets.pop()
+            if (target_platform, target_user) == (platform, user_id) or self.is_manager(target_platform, target_user):
+                transport.send(user_id, 'Выберите чат пользователя, а не сотрудника.', preserve=True)
+                return
+            if target_platform not in self.transports:
+                transport.send(user_id, 'Транспорт пользователя сейчас недоступен.', preserve=True)
+                return
+            busy = self.active(platform, user_id)
+            if busy and (busy['platform'], busy['user_id']) != (target_platform, target_user):
+                transport.send(user_id, f'У вас уже есть активный чат: {escape(self.customer(busy))}. Сначала завершите его командой /endchat.', inline=END_MENU, preserve=True)
+                return
+            chat = self.store._one("SELECT * FROM chat_sessions WHERE platform=? AND user_id=? AND status IN ('open','active')", (target_platform, target_user))
+            if not chat:
+                cid = self.store.db.execute('INSERT INTO chat_sessions(platform,user_id,created_at) VALUES(?,?,?)', (target_platform, target_user, int(time.time()))).lastrowid
+            else:
+                cid = chat['id']
+            self.callback(transport, platform, user_id, f'chat:session:{cid}')
+
     def callback(self, transport, platform, user_id, data):
         if data in {'chat:start', 'chat:start_agent'}:
             if self.is_manager(platform, user_id):
@@ -120,19 +174,19 @@ class ChatService:
                     result = 'Чат завершён или не найден.'
                 elif busy and busy['id'] != cid:
                     result = f"У вас уже есть активный чат: {self.customer(busy)}. Сначала завершите его."
-                elif chat['manager_id'] and chat['manager_id'] != user_id:
+                elif chat['manager_id'] and (chat['manager_platform'], chat['manager_id']) != (platform, user_id):
                     result = 'Уже подключился другой менеджер.'
                 elif chat['platform'] not in self.transports:
                     result = 'Транспорт пользователя сейчас недоступен.'
-                elif chat['manager_id'] == user_id:
+                elif (chat['manager_platform'], chat['manager_id']) == (platform, user_id):
                     result = f"Открыт диалог: {self.customer(chat)}. Пишите обычными сообщениями."
                 else:
-                    self.store.db.execute("UPDATE chat_sessions SET manager_id=?,status='active' WHERE id=?", (user_id, cid))
+                    self.store.db.execute("UPDATE chat_sessions SET manager_platform=?,manager_id=?,status='active' WHERE id=?", (platform, user_id, cid))
                     result = f"Вы подключились к чату с {self.customer(chat)}. Пишите обычными сообщениями."
                     self.send_to(transport, chat['platform'], chat['user_id'], 'Менеджер подключился к диалогу.', END_MENU)
                     for row in self.store.db.execute("SELECT text,attachments_json FROM chat_messages WHERE session_id=? AND sender_role='user' ORDER BY id", (cid,)).fetchall():
-                        self.send_text(transport, 'telegram', user_id, self.customer(chat), row['text'])
-                        self.send_attachments(transport, chat['platform'], 'telegram', user_id, json.loads(row['attachments_json']))
+                        self.send_text(transport, platform, user_id, self.customer(chat), row['text'])
+                        self.send_attachments(transport, chat['platform'], platform, user_id, json.loads(row['attachments_json']))
             transport.send(user_id, escape(result), inline=END_MENU, preserve=True)
             return True
         if data == 'chat:end':
@@ -143,7 +197,7 @@ class ChatService:
                     if self.is_manager(platform, user_id):
                         self.send_to(transport, chat['platform'], chat['user_id'], 'Чат завершён.')
                     elif chat['manager_id']:
-                        self.send_to(transport, 'telegram', chat['manager_id'], f"Чат с {escape(self.customer(chat))} завершён.")
+                        self.send_to(transport, chat['manager_platform'], chat['manager_id'], f"Чат с {escape(self.customer(chat))} завершён.")
             transport.send(user_id, 'Чат завершён.' if chat else 'Активного чата сейчас нет.', preserve=True)
             return True
         return False
@@ -154,7 +208,7 @@ class ChatService:
         with self.store.db:
             chat = self.active(platform, user_id)
             if not chat:
-                if self.is_manager(platform, user_id):
+                if self.is_manager(platform, user_id) and user_id not in self.config.admin_ids:
                     transport.send(user_id, 'Активного чата сейчас нет. Подключитесь кнопкой в обращении пользователя.', preserve=True)
                     return True
                 return False
@@ -172,8 +226,8 @@ class ChatService:
                 self.send_text(transport, chat['platform'], chat['user_id'], 'Менеджер', text)
                 self.send_attachments(transport, platform, chat['platform'], chat['user_id'], attachments)
             elif chat['manager_id']:
-                self.send_text(transport, 'telegram', chat['manager_id'], self.customer(chat), text)
-                self.send_attachments(transport, platform, 'telegram', chat['manager_id'], attachments)
+                self.send_text(transport, chat['manager_platform'], chat['manager_id'], self.customer(chat), text)
+                self.send_attachments(transport, platform, chat['manager_platform'], chat['manager_id'], attachments)
             else:
                 transport.send(user_id, 'Сообщение сохранено. Менеджер подключится, как только освободится.', inline=END_MENU, preserve=True)
         return True

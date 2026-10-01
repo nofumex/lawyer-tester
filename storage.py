@@ -155,6 +155,10 @@ class Storage:
         """)
         if 'attachments_json' not in {r[1] for r in self.db.execute('PRAGMA table_info(chat_messages)')}:
             self.db.execute("ALTER TABLE chat_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+        if 'manager_platform' not in {r[1] for r in self.db.execute('PRAGMA table_info(chat_sessions)')}:
+            self.db.execute("ALTER TABLE chat_sessions ADD COLUMN manager_platform TEXT NOT NULL DEFAULT 'telegram'")
+            self.db.execute('DROP INDEX IF EXISTS uq_chat_manager')
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_manager ON chat_sessions(manager_platform,manager_id) WHERE status='active'")
         if 'amo_created' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
             self.db.execute('ALTER TABLE attempts ADD COLUMN amo_created INTEGER NOT NULL DEFAULT 0')
         if 'amo_link_in_progress' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:

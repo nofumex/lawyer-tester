@@ -54,6 +54,13 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     agent=getattr(engine,'agent_program',None)
     mailings=getattr(engine,'mailing_service',None)
     chat=getattr(agent,'chat',None)
+    if text and text.split(maxsplit=1)[0].split('@',1)[0]=='/chat':
+        if chat:
+            parts=text.split(maxsplit=1)
+            chat.command(transport,transport.platform,user_id,parts[1] if len(parts)>1 else '')
+        else:
+            transport.send(user_id,'Сервис чатов недоступен.')
+        return
     if chat:
         if callback and callback.startswith('chat:'):
             if chat.callback(transport,transport.platform,user_id,callback):

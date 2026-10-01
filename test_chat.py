@@ -277,6 +277,102 @@ class ChatTests(unittest.TestCase):
         self.event('telegram', '88', 13, 'Ответ')
         self.assertIn('Подключитесь кнопкой', self.transports['telegram'].sent[-1][1])
 
+    def test_admin_chat_by_lead_opens_dialog_without_user_request_and_relays(self):
+        self.event('telegram', '99', 20, '/chat 101')
+        chat = self.chat.active('telegram', '99')
+        self.assertEqual((chat['platform'], chat['user_id']), ('max', '1'))
+        self.assertIn('MAX ID 1', self.transports['telegram'].sent[-1][1])
+        self.event('telegram', '99', 21, 'Ответ администратора')
+        self.event('max', '1', 22, 'Ответ клиента')
+        self.assertEqual(self.transports['telegram'].sent[-1][0], '99')
+        self.chat.retry_crm_notes()
+        self.assertEqual([lead for lead, _ in self.crm.notes], [101, 101])
+        self.assertIn('Отправитель: Менеджер', self.crm.notes[0][1])
+
+    def test_admin_chat_by_platform_and_username_case_insensitive(self):
+        self.store.touch_user('telegram', '1', 'Клиент', 'Client_Name')
+        for number, argument, target in [(23, '@client_NAME', 'telegram'), (24, 'Client_Name', 'telegram'),
+                                        (25, 'telegram:1', 'telegram'), (26, 'max:1', 'max'), (27, 'lead:101', 'max')]:
+            self.event('telegram', '99', number, '/chat ' + argument)
+            self.assertEqual(self.chat.active('telegram', '99')['platform'], target)
+            self.event('telegram', '99', number + 100, '/endchat')
+
+    def test_admin_chat_bare_user_id_with_unique_match(self):
+        self.store.touch_user('max', '555', 'Новый клиент')
+        self.event('telegram', '99', 28, '/chat 555')
+        self.assertEqual(self.chat.active('telegram', '99')['user_id'], '555')
+        self.assertEqual(self.store._one("SELECT count(*) n FROM attempts WHERE user_id='555'")['n'], 0)
+
+    def test_admin_chat_ambiguous_number_requires_explicit_target(self):
+        self.event('telegram', '99', 29, '/chat 1')
+        self.assertIn('/chat max:1', self.transports['telegram'].sent[-1][1])
+        self.assertIn('/chat telegram:1', self.transports['telegram'].sent[-1][1])
+        self.assertIsNone(self.chat.active('telegram', '99'))
+        # A lead ID may also collide with another user's platform ID.
+        self.store.touch_user('telegram', '101', 'Другой клиент')
+        self.event('telegram', '99', 30, '/chat 101')
+        self.assertIsNone(self.chat.active('telegram', '99'))
+
+    def test_admin_chat_rejects_nonadmin_missing_user_and_invalid_input(self):
+        for number, user, command, response in [(31, '88', '/chat 101', 'Недостаточно прав'),
+                                              (32, '1', '/chat 101', 'Недостаточно прав'),
+                                              (33, '99', '/chat', 'Использование'),
+                                              (34, '99', '/chat @missing', 'не найден'),
+                                              (35, '99', '/chat invalid input', 'не найден'),
+                                              (36, '99', '/chat telegram:99', 'не сотрудника')]:
+            self.event('telegram', user, number, command)
+            self.assertIn(response, self.transports['telegram'].sent[-1][1])
+        self.assertEqual(self.store._one('SELECT count(*) n FROM chat_sessions')['n'], 0)
+
+    def test_admin_chat_keeps_busy_dialog_and_other_managers_assignment(self):
+        cid = self.start()
+        self.connect(cid)
+        self.event('telegram', '99', 37, '/chat lead:101')
+        self.assertIn('другой менеджер', self.transports['telegram'].sent[-1][1])
+        self.assertEqual(self.chat.active('telegram', '88')['id'], cid)
+        self.event('telegram', '99', 38, '/chat telegram:1')
+        self.event('telegram', '99', 39, '/chat max:1')
+        self.assertIn('/endchat', self.transports['telegram'].sent[-1][1])
+        self.assertEqual(self.chat.active('telegram', '99')['platform'], 'telegram')
+
+    def test_admin_chat_reopens_closed_chat_and_repeated_command_is_idempotent(self):
+        cid = self.start()
+        self.chat.callback(self.transports['max'], 'max', '1', 'chat:end')
+        self.event('telegram', '99', 40, '/chat max:1')
+        self.assertNotEqual(self.chat.active('telegram', '99')['id'], cid)
+        count = len(self.transports['max'].sent)
+        self.event('telegram', '99', 41, '/chat max:1')
+        self.assertEqual(len(self.transports['max'].sent), count)
+        self.assertEqual(self.store._one("SELECT count(*) n FROM chat_sessions WHERE status='active'")['n'], 1)
+
+    def test_max_admin_dialog_routes_manager_messages_and_end_to_max(self):
+        self.event('max', '99', 42, '/chat telegram:1')
+        self.event('telegram', '1', 43, 'Сообщение админу MAX')
+        self.assertIn('Сообщение админу MAX', self.transports['max'].sent[-1][1])
+        self.assertEqual(self.transports['max'].sent[-1][0], '99')
+        self.event('max', '99', 44, 'Ответ из MAX')
+        self.assertEqual(self.transports['telegram'].sent[-1][0], '1')
+        self.event('telegram', '1', 45, '/endchat')
+        self.assertIn('завершён', self.transports['max'].sent[-1][1])
+        self.assertIsNone(self.chat.active('max', '99'))
+
+    def test_staff_platform_ids_have_separate_active_dialogs(self):
+        self.event('telegram', '99', 46, '/chat max:1')
+        self.event('max', '99', 47, '/chat telegram:1')
+        self.assertEqual(self.chat.active('telegram', '99')['platform'], 'max')
+        self.assertEqual(self.chat.active('max', '99')['platform'], 'telegram')
+
+    def test_admin_text_editor_still_receives_input_without_active_chat(self):
+        received = []
+        def admin_text(platform, user, text):
+            received.append(text)
+            return 'Сохранено', []
+        admin = SimpleNamespace(text=admin_text)
+        update = {'update_id': 48, 'message': {'message_id': 48, 'from': {'id': '99'}, 'text': 'Текст вопроса'}}
+        handle(self.transports['telegram'], update, self.engine, admin, self.config, self.transports)
+        self.assertEqual(received, ['Текст вопроса'])
+        self.assertEqual(self.transports['telegram'].sent[-1][1], 'Сохранено')
+
 
 class AttachmentTransportTests(unittest.TestCase):
     def setUp(self):
