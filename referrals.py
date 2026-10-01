@@ -11,6 +11,8 @@ from html import escape
 from typing import Any
 from urllib.parse import quote
 
+from chat import ChatService
+
 LOG = logging.getLogger(__name__)
 
 
@@ -34,6 +36,7 @@ def money(value: int) -> str:
 class AgentProgram:
     def __init__(self, store: Any, config: Any, crm: Any, mailings: Any, transports: dict[str, Any]) -> None:
         self.store, self.config, self.crm, self.mailings, self.transports = store, config, crm, mailings, transports
+        self.chat = ChatService(store, config, crm, transports)
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="referral")
 
     def close(self) -> None:
@@ -43,6 +46,7 @@ class AgentProgram:
         """Retry durable amoCRM work; operation keys keep restarts idempotent."""
         while not stop_event.is_set():
             try:
+                self.chat.retry_crm_notes()
                 for row in self.store.db.execute(
                     "SELECT id FROM referral_leads WHERE status<>'draft' AND (amo_sync_status IS NULL OR amo_sync_status='failed') ORDER BY id LIMIT 100"
                 ).fetchall():
@@ -448,10 +452,6 @@ class AgentProgram:
             return True
         if data in {"agent:warn:yes", "agent:warn:no", "agent:call:yes", "agent:call:no"}:
             return self._followup_callback(transport, platform, user_id, data)
-        if data == "chat:start_agent":
-            self._set_session(platform, user_id, "manager_message", {})
-            transport.send(user_id, "Напишите сообщение менеджеру А7 Консалт. Мы сохраним его и передадим сотруднику.")
-            return True
         return False
 
     def _followup_callback(self, transport: Any, platform: str, user_id: str, data: str) -> bool:
@@ -570,19 +570,6 @@ class AgentProgram:
             self._set_session(platform, user_id, "client_warning", data)
             transport.send(user_id, "Получится предупредить знакомого, что ему позвонит менеджер А7 Консалт?", inline=[[button("Да", "agent:warn:yes"), button("Нет", "agent:warn:no")]], preserve=True)
             return True
-        if state == "manager_message":
-            now = int(time.time())
-            with self.store.db:
-                message_id = self.store.db.execute("INSERT INTO manager_messages(platform,user_id,direction,text,created_at) VALUES(?,?, 'to_manager',?,?)", (platform, user_id, clean[:4000], now)).lastrowid
-            self._clear_session(platform, user_id)
-            transport.send(user_id, "Сообщение передано менеджеру А7 Консалт.", inline=self.menu())
-            for manager_id in self.config.admin_ids:
-                if str(manager_id) != user_id:
-                    try:
-                        transport.send(str(manager_id), f"Сообщение агенту поддержки #{message_id} от {platform}/{user_id}:\n\n{escape(clean[:3500])}\n\nОтвет: /reply {message_id} текст")
-                    except Exception:
-                        LOG.exception("Cannot notify manager %s", manager_id)
-            return True
         return False
 
     def start_payload(self, platform: str, user_id: str, text: str) -> bool:
@@ -591,19 +578,6 @@ class AgentProgram:
         return self.attach_referrer(platform, user_id, match.group(1), match.group(2)) if match else False
 
     def admin_command(self, transport: Any, platform: str, user_id: str, text: str) -> str | None:
-        if text.startswith("/reply "):
-            _, message_id, reply = text.split(" ", 2)
-            row = self.store._one("SELECT * FROM manager_messages WHERE id=?", (int(message_id),))
-            if not row:
-                return "Сообщение не найдено."
-            target = self.transports.get(str(row["platform"]))
-            if not target:
-                return "Транспорт пользователя сейчас недоступен."
-            self.executor.submit(self._safe_send, target, str(row["user_id"]), f"<b>Ответ менеджера А7 Консалт</b>\n\n{escape(reply)}", self.menu())
-            with self.store.db:
-                self.store.db.execute("UPDATE manager_messages SET status='replied',replied_at=? WHERE id=?", (int(time.time()), int(message_id)))
-                self.store.db.execute("INSERT INTO manager_messages(platform,user_id,direction,text,status,created_at,replied_at) VALUES(?,?, 'from_manager',?,'sent',?,?)", (row["platform"], row["user_id"], reply, int(time.time()), int(time.time())))
-            return "Ответ отправлен."
         if text.startswith("/bonus_paid "):
             bonus_id = int(text.split()[1])
             row = self.store._one("SELECT * FROM bonuses WHERE id=?", (bonus_id,))

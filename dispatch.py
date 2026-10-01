@@ -10,6 +10,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from background import cleanup, latency
+from chat import message_key
+from transports import send_chat_attachments
 
 
 class ResponsePlan:
@@ -18,7 +20,7 @@ class ResponsePlan:
         self.calls = []
 
     def __getattr__(self, method):
-        if method not in {'send', 'edit', 'answer_callback', 'defer_search', 'defer_broadcast'}:
+        if method not in {'send_chat_attachments', 'send_to', 'send', 'edit', 'answer_callback', 'defer_search', 'defer_broadcast'}:
             raise AttributeError(method)
         def record(*args, **kwargs):
             self.calls.append((method, args, kwargs))
@@ -101,6 +103,11 @@ class UpdateDispatcher:
                         # These paths have no candidate state mutations. Keep
                         # their network calls outside the local transaction.
                         self.handle(self.transport,args[0],self.engine,self.admin,self.config,self.transports)
+                    elif method == 'send_to':
+                        platform, target, text = args
+                        (self.transports or {self.transport.platform:self.transport})[platform].send(target,text,**kwargs)
+                    elif method == 'send_chat_attachments':
+                        send_chat_attachments(self.transports, *args, **kwargs)
                     elif method == 'answer_callback' and kwargs.get('inline') is None:
                         cleanup.submit(self._ack,*args,**kwargs)
                     else:
@@ -113,7 +120,9 @@ class UpdateDispatcher:
                 (self.transport.platform, user),
             )
             preserving_client_form = bool(agent_session and str(agent_session['state']).startswith('client_'))
-            if incoming.get('message_id') and not preserving_client_form:
+            chat_message = self.store._one('SELECT id FROM chat_messages WHERE external_key=?',
+                                           (message_key(self.transport.platform,update,user),))
+            if incoming.get('message_id') and not preserving_client_form and not chat_message:
                 cleanup.submit(self.transport.delete,
                                str(incoming.get('chat',{}).get('id') or user),str(incoming['message_id']))
             with self.store.db:

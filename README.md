@@ -49,4 +49,4 @@ Bonus operations are intentionally explicit:
 - `/bonus PLATFORM USER_ID AMOUNT LEAD_ID [comment]`
 - `/bonus_paid BONUS_ID`
 
-Manager messages are stored durably. An admin replies with `/reply MESSAGE_ID text`.
+Users open a manager chat with the support button or `/tutor`. Telegram accounts in `MANAGER_IDS` connect using the notification button, then send ordinary messages to that user (Telegram or MAX). Each manager has one active chat; either participant can end it with the button or `/endchat`. SQLite retains chat sessions, full message history, and a retry queue for separate human-readable amoCRM notes. Notes use the user's existing `attempts.amo_lead_id`; chat never creates deals. Messages waiting for a manager are shown when they connect. Legacy `manager_messages` history is retained.

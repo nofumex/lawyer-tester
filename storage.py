@@ -142,7 +142,19 @@ class Storage:
         CREATE TABLE IF NOT EXISTS manager_messages(
             id INTEGER PRIMARY KEY,platform TEXT NOT NULL,user_id TEXT NOT NULL,direction TEXT NOT NULL,
             text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'new',created_at INTEGER NOT NULL,replied_at INTEGER);
+        CREATE TABLE IF NOT EXISTS chat_sessions(
+            id INTEGER PRIMARY KEY,platform TEXT NOT NULL,user_id TEXT NOT NULL,manager_id TEXT,
+            status TEXT NOT NULL DEFAULT 'open',created_at INTEGER NOT NULL,closed_at INTEGER);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_user ON chat_sessions(platform,user_id) WHERE status IN ('open','active');
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_manager ON chat_sessions(manager_id) WHERE status='active';
+        CREATE TABLE IF NOT EXISTS chat_messages(
+            id INTEGER PRIMARY KEY,session_id INTEGER NOT NULL REFERENCES chat_sessions(id),
+            sender_role TEXT NOT NULL,text TEXT NOT NULL,external_key TEXT UNIQUE,created_at INTEGER NOT NULL,
+            amo_lead_id INTEGER,note_text TEXT NOT NULL,crm_status TEXT NOT NULL DEFAULT 'pending',
+            lease_until INTEGER,error_message TEXT);
         """)
+        if 'attachments_json' not in {r[1] for r in self.db.execute('PRAGMA table_info(chat_messages)')}:
+            self.db.execute("ALTER TABLE chat_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
         if 'amo_created' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
             self.db.execute('ALTER TABLE attempts ADD COLUMN amo_created INTEGER NOT NULL DEFAULT 0')
         if 'amo_link_in_progress' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:

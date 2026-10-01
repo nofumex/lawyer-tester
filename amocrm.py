@@ -62,8 +62,15 @@ class AmoClient:
 
     def has_note(self, lead_id: int, marker: str) -> bool:
         """Find our invisible operation marker before replaying an interrupted note."""
-        data=self.request("GET", f"/api/v4/leads/{lead_id}/notes",params={"limit":250}) or {}
-        return any(marker in str(note.get("params",{}).get("text", "")) for note in data.get("_embedded",{}).get("notes",[]))
+        page = 1
+        while True:
+            data = self.request("GET", f"/api/v4/leads/{lead_id}/notes", params={"limit":250,"page":page}) or {}
+            notes = data.get("_embedded",{}).get("notes",[])
+            if any(marker in str(note.get("params",{}).get("text", "")) for note in notes):
+                return True
+            if not data.get('_links',{}).get('next') and len(notes) < 250:
+                return False
+            page += 1
 
     def move_lead(self, lead_id: int, pipeline_id: int, status_id: int) -> None:
         self.request("PATCH", f"/api/v4/leads/{lead_id}", body={"pipeline_id":pipeline_id, "status_id":status_id})

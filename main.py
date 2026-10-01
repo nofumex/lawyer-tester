@@ -7,6 +7,7 @@ import time
 from html import escape
 
 from background import latency
+from chat import message_key, message_content
 from dispatch import UpdateDispatcher
 
 from admin import Admin
@@ -52,6 +53,19 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
     is_admin=user_id in config.admin_ids
     agent=getattr(engine,'agent_program',None)
     mailings=getattr(engine,'mailing_service',None)
+    chat=getattr(agent,'chat',None)
+    if chat:
+        if callback and callback.startswith('chat:'):
+            if chat.callback(transport,transport.platform,user_id,callback):
+                if callback_query.get('id'): answer_callback_best_effort(transport,str(callback_query['id']))
+                return
+        if text in {'/endchat','Завершить чат'}:
+            chat.callback(transport,transport.platform,user_id,'chat:end'); return
+        if text in {'/tutor','/manager'}:
+            chat.callback(transport,transport.platform,user_id,'chat:start'); return
+        chat_text,attachments=message_content(update.get('message') or {})
+        if chat.relay(transport,transport.platform,user_id,chat_text,message_key(transport.platform,update,user_id),attachments):
+            return
     if callback=='user:test':
         if callback_query.get('id'): answer_callback_best_effort(transport,str(callback_query['id']))
         greeting,prompt=engine.begin(transport.platform,user_id,name)
@@ -112,7 +126,7 @@ def handle(transport:Transport, update:dict, engine:SurveyEngine, admin:Admin, c
         if not is_admin: transport.send(user_id,'Недостаточно прав.');return
         transport.send(user_id,mailings.admin_command(transport.platform,user_id,text) if mailings else 'Сервис рассылок недоступен.')
         return
-    if is_admin and agent and (text.startswith('/bonus ') or text.startswith('/bonus_paid ') or text.startswith('/reply ')):
+    if is_admin and agent and (text.startswith('/bonus ') or text.startswith('/bonus_paid ')):
         result=agent.admin_command(transport,transport.platform,user_id,text)
         if result:transport.send(user_id,result)
         return

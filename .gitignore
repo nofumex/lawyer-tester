@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 bot.out.log
 bot.err.log
+storage/chat/

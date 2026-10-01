@@ -34,4 +34,19 @@ class AmoFindLeadTests(unittest.TestCase):
         client=Client(); client.request=lambda *args, **kwargs: None
         self.assertIsNone(client.find_lead('Иванов Иван','79990000000'))
 
+    def test_note_deduplication_searches_beyond_first_page(self):
+        client = Client()
+        pages = []
+        def request(method, path, *, params):
+            pages.append(params['page'])
+            return {'_embedded': {'notes': [{'params': {'text': 'other'}}] * 250}} if params['page'] == 1 else {'_embedded': {'notes': [{'params': {'text': 'message-marker'}}]}}
+        client.request = request
+        self.assertTrue(client.has_note(123, 'message-marker'))
+        self.assertEqual(pages, [1, 2])
+
+    def test_note_deduplication_stops_at_empty_result(self):
+        client = Client()
+        client.request = lambda *args, **kwargs: None
+        self.assertFalse(client.has_note(123, 'message-marker'))
+
 if __name__ == '__main__': unittest.main()
